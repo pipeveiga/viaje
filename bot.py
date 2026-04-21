@@ -249,7 +249,13 @@ async def handle_document_or_photo(
         await msg.reply_text(f"⚠️ Error procesando el documento: {exc}")
         return
 
+    is_roundtrip = bool(extracted.get("es_ida_vuelta"))
     checklist_id = _match_checklist(extracted.get("coincide_checklist"))
+    checklist_id_vuelta = (
+        _match_checklist(extracted.get("coincide_checklist_vuelta"))
+        if is_roundtrip
+        else None
+    )
 
     payload = {
         "filename": filename,
@@ -257,41 +263,53 @@ async def handle_document_or_photo(
         "doc_type": extracted.get("tipo"),
         "description": extracted.get("descripcion"),
         "amount_eur": extracted.get("monto_eur"),
+        "amount_total_eur": extracted.get("monto_total_eur"),
         "amount_usd": extracted.get("monto_usd"),
         "date": extracted.get("fecha"),
         "provider": extracted.get("proveedor"),
         "reservation_number": extracted.get("numero_reserva"),
         "day_number": extracted.get("dia_viaje"),
+        "is_roundtrip": is_roundtrip,
         "checklist_id": checklist_id,
+        "checklist_id_vuelta": checklist_id_vuelta,
         "confidence": extracted.get("confianza"),
     }
     _save_pending(str(msg.chat_id), payload)
 
-    amount_str = (
-        f"€{payload['amount_eur']:.2f}"
-        if payload["amount_eur"] is not None
-        else "s/d"
-    )
-    checklist_line = ""
+    per_leg = payload["amount_eur"]
+    total = payload["amount_total_eur"]
+    if is_roundtrip and per_leg is not None and total is not None:
+        amount_str = f"€{total:.2f} total → €{per_leg:.2f} por tramo (×2)"
+    elif per_leg is not None:
+        amount_str = f"€{per_leg:.2f}"
+    else:
+        amount_str = "s/d"
+
+    concept_by_id = {c["id"]: c["concept"] for c in checklist_items}
+    checklist_lines = []
     if checklist_id:
-        concept = next(
-            (c["concept"] for c in checklist_items if c["id"] == checklist_id),
-            None,
-        )
-        if concept:
-            checklist_line = f"\n✅ Se marcará como pagado: {concept}"
+        name = concept_by_id.get(checklist_id)
+        if name:
+            checklist_lines.append(f"✅ Se marcará como pagado: {name}")
+    if checklist_id_vuelta:
+        name = concept_by_id.get(checklist_id_vuelta)
+        if name:
+            checklist_lines.append(f"✅ Se marcará como pagado: {name}")
+    checklist_block = ("\n" + "\n".join(checklist_lines)) if checklist_lines else ""
 
     day_line = ""
-    if payload["day_number"]:
+    if payload["day_number"] and not is_roundtrip:
         day_line = f"\n📅 Se agregará al día {payload['day_number']} del itinerario"
+
+    roundtrip_tag = " (ida y vuelta)" if is_roundtrip else ""
 
     summary = (
         f"🔍 *Detecté:*\n"
-        f"📄 {payload['description'] or 'documento'}\n"
+        f"📄 {payload['description'] or 'documento'}{roundtrip_tag}\n"
         f"📆 Fecha: {payload['date'] or 's/d'}\n"
         f"💶 Monto: {amount_str}\n"
         f"🏷️ Tipo: {payload['doc_type'] or 'otro'}"
-        f"{checklist_line}{day_line}\n\n"
+        f"{checklist_block}{day_line}\n\n"
         "¿Es correcto? Respondé *SI* para confirmar o *NO* para cancelar."
     )
     await msg.reply_text(summary, parse_mode="Markdown")
@@ -308,6 +326,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text("No hay nada pendiente de confirmar.")
             return
 
+        today_iso = datetime.now().date().isoformat()
+        per_leg = data.get("amount_eur")
+        is_roundtrip = bool(data.get("is_roundtrip"))
+
         with get_db() as conn:
             conn.execute(
                 """INSERT INTO documents
@@ -320,7 +342,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     data["file_path"],
                     data["doc_type"],
                     data["description"],
-                    data["amount_eur"],
+                    data.get("amount_total_eur") if is_roundtrip else per_leg,
                     data["amount_usd"],
                     data["date"],
                     data["provider"],
@@ -330,19 +352,37 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     data["confidence"],
                 ),
             )
-            if data.get("checklist_id"):
-                conn.execute(
-                    """UPDATE checklist SET status = 'paid', paid_date = ?
-                       WHERE id = ?""",
-                    (datetime.now().date().isoformat(), data["checklist_id"]),
-                )
-            if data.get("day_number") and data.get("amount_eur") is not None:
+
+            for cid in (data.get("checklist_id"), data.get("checklist_id_vuelta")):
+                if not cid:
+                    continue
+                if per_leg is not None:
+                    conn.execute(
+                        """UPDATE checklist
+                           SET status = 'paid', paid_date = ?, amount_eur = ?
+                           WHERE id = ?""",
+                        (today_iso, per_leg, cid),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE checklist SET status = 'paid', paid_date = ?
+                           WHERE id = ?""",
+                        (today_iso, cid),
+                    )
+
+            # Upfront flights are not "gastos del día" — don't touch itinerary.
+            should_touch_itinerary = (
+                not is_roundtrip
+                and data.get("day_number")
+                and per_leg is not None
+            )
+            if should_touch_itinerary:
                 row = conn.execute(
                     "SELECT real_expense FROM itinerary WHERE day_number = ?",
                     (data["day_number"],),
                 ).fetchone()
                 current = (row["real_expense"] or 0) if row else 0
-                new_value = current + float(data["amount_eur"])
+                new_value = current + float(per_leg)
                 conn.execute(
                     """UPDATE itinerary
                        SET real_expense = ?, status = 'completed'
