@@ -4,9 +4,13 @@ Run in a separate process alongside the FastAPI server:
     python bot.py
 
 The bot only responds to the chat id configured in TELEGRAM_CHAT_ID.
-When the user sends a photo or PDF, it is forwarded to Claude for extraction;
-the bot then replies with a summary and waits for SI/NO confirmation before
-committing the data.
+
+Behavior:
+- Commands /start /resumen /hoy /pendientes — quick lookups.
+- Photo or PDF → sent to OpenAI for extraction; waits for SI/NO confirmation
+  before persisting.
+- Any other text (that isn't a pending SI/NO) is treated as a free-form
+  question and answered by OpenAI with the full trip context as prompt.
 """
 from __future__ import annotations
 
@@ -31,7 +35,7 @@ from telegram.ext import (
     filters,
 )
 
-from ai_processor import process_document
+from ai_processor import answer_question, process_document
 from database import get_config, get_db, init_db
 
 logging.basicConfig(
@@ -64,12 +68,15 @@ async def _guard(update: Update) -> bool:
 
 HELP_TEXT = (
     "✈️ *TripDesk Bot*\n\n"
-    "Comandos disponibles:\n"
+    "Comandos rápidos:\n"
     "• /resumen — resumen financiero del viaje\n"
     "• /hoy — plan del día actual\n"
     "• /pendientes — pagos pendientes del checklist\n\n"
-    "También podés mandarme fotos o PDFs de facturas, reservas o tickets y los"
-    " proceso automáticamente."
+    "📎 Mandame fotos o PDFs de facturas, reservas o tickets y los proceso"
+    " automáticamente (te pido SI/NO antes de guardar).\n\n"
+    "💬 Y escribime cualquier pregunta sobre el viaje (ej: _\"cuánto me queda"
+    " por pagar?\"_, _\"qué hago el 4-ago?\"_, _\"en qué hotel me quedo en"
+    " Roma?\"_) y te contesto con la info del itinerario."
 )
 
 
@@ -290,7 +297,7 @@ async def handle_document_or_photo(
     await msg.reply_text(summary, parse_mode="Markdown")
 
 
-async def handle_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard(update):
         return
     text = (update.message.text or "").strip().lower()
@@ -360,9 +367,97 @@ async def handle_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("No hay nada pendiente de confirmar.")
         return
 
-    await update.message.reply_text(
-        "No entendí. Usá /start para ver los comandos."
+    # Cualquier otro texto → Q&A con OpenAI usando el contexto del viaje.
+    await _answer_free_text(update, context)
+
+
+async def _answer_free_text(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    await context.bot.send_chat_action(
+        chat_id=update.message.chat_id, action=ChatAction.TYPING
     )
+    try:
+        context_block = _build_trip_context()
+        answer = answer_question(update.message.text, context_block)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Q&A failed")
+        await update.message.reply_text(f"⚠️ No pude contestar: {exc}")
+        return
+    await update.message.reply_text(answer)
+
+
+def _build_trip_context() -> str:
+    """Return a compact text snapshot of the trip state for the LLM."""
+    rate = float(get_config("eur_usd_rate", "1.172") or "1.172")
+    start = get_config("start_date", "2026-07-25") or "2026-07-25"
+    end = get_config("end_date", "2026-08-15") or "2026-08-15"
+    traveler = get_config("traveler", "Felipe Veiga") or "Felipe Veiga"
+
+    today = date.today()
+    start_d = date.fromisoformat(start)
+    end_d = date.fromisoformat(end)
+    total_days = (end_d - start_d).days + 1
+    if today < start_d:
+        trip_state = f"faltan {(start_d - today).days} días para el viaje"
+    elif today > end_d:
+        trip_state = "el viaje ya terminó"
+    else:
+        current_day = (today - start_d).days + 1
+        trip_state = f"en viaje, día {current_day} de {total_days}"
+
+    with get_db() as conn:
+        itin = conn.execute(
+            """SELECT day_number, date, city, activity, estimated_expense,
+                      real_expense FROM itinerary ORDER BY day_number"""
+        ).fetchall()
+        ch = conn.execute(
+            "SELECT id, concept, detail, amount_eur, status, reservation_code "
+            "FROM checklist ORDER BY id"
+        ).fetchall()
+
+    est = sum((r["estimated_expense"] or 0) for r in itin)
+    spent = sum((r["real_expense"] or 0) for r in itin)
+    paid = sum((r["amount_eur"] or 0) for r in ch if r["status"] == "paid")
+    pending = sum((r["amount_eur"] or 0) for r in ch if r["status"] == "pending")
+    total = est + paid + pending
+
+    def eur(v: float) -> str:
+        return f"€{v:,.2f}"
+
+    lines = [
+        f"Viajero: {traveler}",
+        f"Fechas: {start} → {end} ({total_days} días, {trip_state})",
+        f"Hoy: {today.isoformat()}",
+        f"Tipo de cambio EUR/USD: {rate}",
+        "",
+        "Presupuesto:",
+        f"  Total estimado: {eur(total)}",
+        f"  Pagado: {eur(paid)}",
+        f"  Pendiente por pagar: {eur(pending)}",
+        f"  Gastado en viaje: {eur(spent)}",
+        "",
+        "Itinerario completo:",
+    ]
+    for r in itin:
+        real = (
+            f" · real €{r['real_expense']:.2f}"
+            if r["real_expense"] is not None
+            else ""
+        )
+        lines.append(
+            f"  Día {r['day_number']} · {r['date']} · {r['city']} · "
+            f"{r['activity']} · est €{r['estimated_expense']:.2f}{real}"
+        )
+    lines.append("")
+    lines.append("Checklist de pagos:")
+    for r in ch:
+        mark = "✅ pagado" if r["status"] == "paid" else "⏳ pendiente"
+        amount = f" · €{r['amount_eur']:.2f}" if r["amount_eur"] is not None else ""
+        code = f" · cod {r['reservation_code']}" if r["reservation_code"] else ""
+        detail = f" ({r['detail']})" if r["detail"] else ""
+        lines.append(f"  [{r['id']}] {mark} · {r['concept']}{detail}{amount}{code}")
+    return "\n".join(lines)
 
 
 def build_app() -> Application:

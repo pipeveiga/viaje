@@ -148,3 +148,32 @@ def process_document(
     )
     text = resp.choices[0].message.content or ""
     return _extract_json(text)
+
+
+ASSISTANT_SYSTEM_PROMPT = """Sos TripDesk, el asistente de viaje de Felipe Veiga
+para su viaje por Europa en 2026. Contestás preguntas sobre el itinerario,
+presupuesto, reservas, pagos y logística del viaje, usando el contexto que te
+paso. Respondé breve (1 a 4 oraciones), en español rioplatense, directo y
+claro. Usá EUR como moneda principal. Si no tenés la info en el contexto,
+decilo en vez de inventar."""
+
+
+def answer_question(question: str, context_block: str) -> str:
+    """Run a stateless Q&A turn with OpenAI, injecting the trip context."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": f"{ASSISTANT_SYSTEM_PROMPT}\n\n{context_block}",
+            },
+            {"role": "user", "content": question},
+        ],
+        max_tokens=600,
+    )
+    return (resp.choices[0].message.content or "").strip()
