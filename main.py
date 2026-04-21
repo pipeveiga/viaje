@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from database import init_db
+from database import init_db, reset_paid_items
 from routers import checklist, config, documents, itinerary, summary
 
 app = FastAPI(title="TripDesk", version="1.0.0")
@@ -53,11 +53,21 @@ def _cli() -> None:
         action="store_true",
         help="Create tables and seed initial data, then exit.",
     )
+    parser.add_argument(
+        "--reset-paid",
+        action="store_true",
+        help="Mark all paid checklist items as pending (clears amounts), then exit.",
+    )
     args = parser.parse_args()
 
     if args.init_db:
         init_db()
         print(f"Database initialized at {os.getenv('DATABASE_PATH', 'tripdesk.db')}")
+        sys.exit(0)
+
+    if args.reset_paid:
+        n = reset_paid_items()
+        print(f"Reset {n} checklist items to pending.")
         sys.exit(0)
 
     import uvicorn

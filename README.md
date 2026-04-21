@@ -17,12 +17,12 @@ Web app + bot de Telegram que procesa facturas y tickets con Claude AI.
 - DB: SQLite (archivo local)
 - Frontend: HTML + Tailwind CDN + vanilla JS (single page)
 - Bot: `python-telegram-bot`
-- IA: Anthropic Claude (`claude-sonnet-4-20250514`)
+- IA: OpenAI (`gpt-4o-mini`) — visión para imágenes, extracción de texto con `pypdf` para PDFs
 
 ## Requisitos
 
 - Python 3.11+
-- Cuenta de Anthropic con API key
+- Cuenta de OpenAI con API key
 - Bot de Telegram creado con `@BotFather`
 - Tu `chat_id` de Telegram (obtenelo con `@userinfobot` o similar)
 
@@ -36,7 +36,7 @@ cd tripdesk
 # 2. Copiar el .env
 cp .env.example .env
 # Editá .env y completá:
-#   ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#   OPENAI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 # 3. Instalar dependencias
 python -m venv .venv
@@ -62,7 +62,7 @@ tripdesk/
 ├── main.py              # FastAPI app + inicialización DB
 ├── bot.py               # Telegram bot (polling)
 ├── database.py          # SQLite (sqlite3 puro)
-├── ai_processor.py      # Claude API — extracción de documentos
+├── ai_processor.py      # OpenAI — extracción de documentos
 ├── routers/
 │   ├── itinerary.py
 │   ├── checklist.py
@@ -88,6 +88,7 @@ tripdesk/
 | `PUT` | `/api/itinerary/{day}` | Actualizar gasto real / estado |
 | `GET` | `/api/checklist` | Checklist de pagos |
 | `PUT` | `/api/checklist/{id}` | Marcar como pagado/pendiente |
+| `POST` | `/api/checklist/reset-paid` | Reset: todos los pagados → pendientes, limpia montos |
 | `GET` | `/api/documents` | Listar documentos |
 | `POST` | `/api/documents` | Subir documento (multipart) |
 | `GET` | `/api/documents/{id}/file` | Descargar archivo |
@@ -104,7 +105,7 @@ Comandos:
 - `/hoy` — plan del día actual
 - `/pendientes` — pagos pendientes
 
-**Procesamiento automático:** mandá una foto o PDF de una factura, reserva o ticket. El bot lo manda a Claude, extrae la info en JSON y te muestra un resumen. Respondé `SI` para confirmar (se guarda en la DB, se marca el checklist correspondiente si matchea, y se suma al día del itinerario) o `NO` para cancelar.
+**Procesamiento automático:** mandá una foto o PDF de una factura, reserva o ticket. El bot lo manda a OpenAI (`gpt-4o-mini`), extrae la info en JSON y te muestra un resumen. Respondé `SI` para confirmar (se guarda en la DB, se marca el checklist correspondiente si matchea, y se suma al día del itinerario) o `NO` para cancelar.
 
 El bot **solo responde al `TELEGRAM_CHAT_ID` configurado en `.env`**, los demás mensajes se descartan.
 

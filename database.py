@@ -118,17 +118,19 @@ ITINERARY_SEED = [
 
 
 # (concept, detail, amount_eur, status, reservation_code)
+# Todos los items arrancan como "pending" y sin monto cargado: el usuario
+# manda los comprobantes al bot y la IA completa los precios reales.
 CHECKLIST_SEED = [
-    ("Vuelo EZE→BCN ida", "Vuelo internacional Buenos Aires → Barcelona", None, "paid", None),
-    ("Vuelo BCN→FCO", "Wizz Air W4 6020, 28-jul 21:45", None, "paid", None),
-    ("Vuelo FCO→BCN", "Ryanair FR 6342, 31-jul 18:10", None, "paid", "H5RT7X"),
-    ("Vuelo BCN→EZE vuelta", "Vuelo internacional Barcelona → Buenos Aires", None, "paid", None),
-    ("Tren BCN→MAD", "Omio, 3-ago", None, "paid", "RFU685/93VZXL"),
-    ("Tren MAD→BCN", "Omio, 6-ago", None, "paid", "RFU685/93VZXL"),
-    ("Bus FCO→Roma Vaticano", "29-jul 01:15", 6.50, "paid", None),
-    ("Bus Roma Vaticano→FCO", "31-jul 15:00", 6.50, "paid", None),
-    ("Hotel Roma Grand Hotel Olympic", "29-31 jul", None, "paid", None),
-    ("Hotel Madrid Colectia Stays Atocha", "3-6 ago", None, "paid", None),
+    ("Vuelo EZE→BCN ida", "Vuelo internacional Buenos Aires → Barcelona", None, "pending", None),
+    ("Vuelo BCN→FCO", "Wizz Air W4 6020, 28-jul 21:45", None, "pending", None),
+    ("Vuelo FCO→BCN", "Ryanair FR 6342, 31-jul 18:10", None, "pending", "H5RT7X"),
+    ("Vuelo BCN→EZE vuelta", "Vuelo internacional Barcelona → Buenos Aires", None, "pending", None),
+    ("Tren BCN→MAD", "Omio, 3-ago", None, "pending", "RFU685/93VZXL"),
+    ("Tren MAD→BCN", "Omio, 6-ago", None, "pending", "RFU685/93VZXL"),
+    ("Bus FCO→Roma Vaticano", "29-jul 01:15", None, "pending", None),
+    ("Bus Roma Vaticano→FCO", "31-jul 15:00", None, "pending", None),
+    ("Hotel Roma Grand Hotel Olympic", "29-31 jul", None, "pending", None),
+    ("Hotel Madrid Colectia Stays Atocha", "3-6 ago", None, "pending", None),
     ("Audiencia Papal Vaticano", "29-jul · GRATIS · pendiente reserva", 0, "pending", None),
     ("Coliseo + Foro Romano", "30-jul", 18, "pending", None),
     ("Tour Bernabéu", "4-ago", 35, "pending", None),
@@ -198,3 +200,17 @@ def set_config(key: str, value: str) -> None:
                ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
             (key, value),
         )
+
+
+def reset_paid_items() -> int:
+    """Mark every paid checklist item as pending and clear its amount.
+
+    Returns the number of rows affected.
+    """
+    with get_db() as conn:
+        cur = conn.execute(
+            """UPDATE checklist
+               SET status = 'pending', paid_date = NULL, amount_eur = NULL
+               WHERE status = 'paid'"""
+        )
+        return cur.rowcount

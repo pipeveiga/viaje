@@ -6,7 +6,7 @@ from datetime import date
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from database import get_db
+from database import get_db, reset_paid_items
 
 router = APIRouter(prefix="/api/checklist", tags=["checklist"])
 
@@ -36,6 +36,17 @@ def list_checklist():
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM checklist ORDER BY id").fetchall()
         return [_row_to_dict(r) for r in rows]
+
+
+@router.post("/reset-paid")
+def reset_paid():
+    """Mark every paid item as pending and clear its amount.
+
+    Usado para regenerar el estado cuando se van a resubir los comprobantes
+    vía el bot y que la IA complete los precios reales.
+    """
+    n = reset_paid_items()
+    return {"reset": n}
 
 
 @router.put("/{item_id}")
