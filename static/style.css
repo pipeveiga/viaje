@@ -1,0 +1,123 @@
+body {
+  background: radial-gradient(ellipse at top, #1e293b 0%, #0f172a 55%, #020617 100%);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.tab-btn {
+  padding: 0.6rem 1rem;
+  border-radius: 0.5rem 0.5rem 0 0;
+  color: #94a3b8;
+  font-weight: 500;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab-btn:hover {
+  color: #cbd5e1;
+}
+.tab-btn.active {
+  color: #60a5fa;
+  border-bottom-color: #3b82f6;
+}
+
+.card {
+  background: rgba(30, 41, 59, 0.55);
+  border: 1px solid rgb(51, 65, 85);
+  border-radius: 0.75rem;
+  padding: 1rem;
+}
+
+.input {
+  background: rgb(15, 23, 42);
+  border: 1px solid rgb(51, 65, 85);
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  color: #e2e8f0;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.input:focus {
+  border-color: #3b82f6;
+}
+
+.btn-primary {
+  background: #3b82f6;
+  color: white;
+  padding: 0.55rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  transition: background 0.15s;
+}
+.btn-primary:hover {
+  background: #2563eb;
+}
+
+.btn-secondary {
+  background: rgb(51, 65, 85);
+  color: #e2e8f0;
+  padding: 0.55rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+}
+.btn-secondary:hover {
+  background: rgb(71, 85, 105);
+}
+
+/* Itinerary rows */
+#itinerary-body tr {
+  border-top: 1px solid rgb(30, 41, 59);
+  transition: background 0.2s;
+}
+#itinerary-body tr:hover {
+  background: rgba(51, 65, 85, 0.3);
+}
+#itinerary-body tr.current-day {
+  background: rgba(59, 130, 246, 0.12);
+  border-left: 3px solid #3b82f6;
+}
+#itinerary-body tr.has-real td {
+  color: #e2e8f0;
+}
+#itinerary-body tr.only-estimated td {
+  color: #94a3b8;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.badge-empty   { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+.badge-inprog  { background: rgba(59, 130, 246, 0.2);  color: #60a5fa; }
+.badge-done    { background: rgba(16, 185, 129, 0.2);  color: #34d399; }
+.badge-paid    { background: rgba(16, 185, 129, 0.2);  color: #34d399; }
+.badge-pending { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+
+/* Fade-in animation on checklist update */
+.fade-flash {
+  animation: flash 0.6s ease-out;
+}
+@keyframes flash {
+  0%   { background: rgba(16, 185, 129, 0.35); }
+  100% { background: transparent; }
+}
+
+.real-input {
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
+  width: 5.5rem;
+  text-align: right;
+  padding: 0.2rem 0.3rem;
+  border-radius: 0.35rem;
+}
+.real-input:hover,
+.real-input:focus {
+  border-color: rgb(71, 85, 105);
+  background: rgb(15, 23, 42);
+  outline: none;
+}
