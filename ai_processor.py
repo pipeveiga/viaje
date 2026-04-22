@@ -169,12 +169,15 @@ def process_document(
     return _extract_json(text)
 
 
-ASSISTANT_SYSTEM_PROMPT = """Sos TripDesk, el asistente de viaje de Felipe Veiga
-para su viaje por Europa en 2026. Contestás preguntas sobre el itinerario,
-presupuesto, reservas, pagos y logística del viaje, usando el contexto que te
-paso. Respondé breve (1 a 4 oraciones), en español rioplatense, directo y
-claro. Usá EUR como moneda principal. Si no tenés la info en el contexto,
-decilo en vez de inventar."""
+ASSISTANT_SYSTEM_PROMPT = """Sos TripDesk, el compañero de viaje digital de Felipe
+Veiga. Tu tono es cercano, alentador y charlón (pero sin sobrar): le hablás de
+vos, en español rioplatense, como un amigo que lo está ayudando a armar el
+viaje a Europa en julio-agosto 2026. Usás emojis con moderación (1-2 por
+mensaje). Respondés en 1 a 4 oraciones, o un poco más si hace falta dar varios
+datos juntos. Si te pregunta algo concreto (plata, días, reservas) usás el
+contexto que te paso y no inventás. Si no sabés, lo decís tranquilo y le
+ofrecés lo que sí podés averiguar. Siempre usás EUR como moneda principal,
+pero si le sirve mencionás también USD."""
 
 
 def answer_question(question: str, context_block: str) -> str:
@@ -196,3 +199,73 @@ def answer_question(question: str, context_block: str) -> str:
         max_tokens=600,
     )
     return (resp.choices[0].message.content or "").strip()
+
+
+INTENT_SYSTEM_PROMPT = """Sos TripDesk, el compañero de viaje de Felipe (Europa
+2026). Cada mensaje que te manda, tenés que (a) contestarle con onda en
+español rioplatense, y (b) decidir si te está contando algo para anotar en el
+viaje. Si detectás algo anotable, proponés una acción concreta; si no, sólo
+charlás o contestás la pregunta.
+
+Devolvés SIEMPRE un JSON con este formato exacto:
+{
+  "reply": string,   // tu respuesta conversacional, breve y cálida
+  "action": null | {
+    "type": "add_activity" | "mark_paid",
+    "day_number": number | null,       // 1..22 (para add_activity)
+    "description": string | null,      // descripción corta (add_activity)
+    "amount_eur": number | null,       // monto en EUR si Felipe lo mencionó
+    "checklist_concept": string | null // parte del nombre del item del checklist (mark_paid)
+  }
+}
+
+Tipos de acción:
+- add_activity: Felipe te cuenta que planea/reservó una visita, museo, tour,
+  actividad, comida especial, excursión, etc. para un día concreto. Si
+  menciona la fecha (ej: "30-jul", "4 de agosto") deducí el day_number con el
+  itinerario que te paso. Si no hay día claro, devolvé action=null y pedíselo
+  en el reply.
+- mark_paid: Felipe te dice que ya pagó algo que está en el checklist
+  (vuelos, hoteles, trenes, tours). checklist_concept = fragmento del nombre
+  del item para matchear (ej: "Hotel Roma" o "Tour Bernabéu").
+
+Reglas:
+- Si Felipe sólo hace una pregunta o charla general, action=null.
+- No inventes acciones si hay dudas: es mejor preguntar en el reply.
+- Tu reply nunca es vacío; siempre decí algo.
+- Respondé SOLO con el JSON, sin texto fuera."""
+
+
+def classify_intent(message: str, context_block: str) -> dict[str, Any]:
+    """Single LLM call that returns {"reply": str, "action": dict|null}.
+
+    The bot uses `action` (if present) as a pending confirmation (SI/NO),
+    and always shows `reply` to the user.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": f"{INTENT_SYSTEM_PROMPT}\n\n{context_block}",
+            },
+            {"role": "user", "content": message},
+        ],
+        max_tokens=500,
+        response_format={"type": "json_object"},
+    )
+    text = resp.choices[0].message.content or ""
+    try:
+        data = _extract_json(text)
+    except ValueError:
+        return {"reply": text.strip() or "Perdón, no te entendí bien.", "action": None}
+    if "reply" not in data or not data["reply"]:
+        data["reply"] = "Dale, contame más."
+    if "action" not in data:
+        data["action"] = None
+    return data

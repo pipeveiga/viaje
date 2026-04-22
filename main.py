@@ -24,7 +24,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from database import init_db, reset_paid_items
+from database import init_db, reset_all_data, reset_paid_items
 from routers import checklist, config, documents, itinerary, summary
 
 logger = logging.getLogger("tripdesk")
@@ -114,6 +114,11 @@ def _cli() -> None:
         action="store_true",
         help="Mark all paid checklist items as pending (clears amounts), then exit.",
     )
+    parser.add_argument(
+        "--reset-all",
+        action="store_true",
+        help="Wipe documents + checklist amounts + itinerary activities, keep the structure.",
+    )
     args = parser.parse_args()
 
     if args.init_db:
@@ -124,6 +129,11 @@ def _cli() -> None:
     if args.reset_paid:
         n = reset_paid_items()
         print(f"Reset {n} checklist items to pending.")
+        sys.exit(0)
+
+    if args.reset_all:
+        result = reset_all_data()
+        print(f"Reset complete: {result}")
         sys.exit(0)
 
     import uvicorn

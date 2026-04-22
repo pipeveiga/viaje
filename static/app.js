@@ -224,7 +224,7 @@ function renderItinerary() {
           </td>
           <td class="px-3 py-3 whitespace-nowrap">${d.date}</td>
           <td class="px-3 py-3">${d.city}</td>
-          <td class="px-3 py-3">${d.activity}</td>
+          <td class="px-3 py-3"><div class="activity-cell">${d.activity || ""}</div></td>
           <td class="px-3 py-3 text-right tabular-nums">${fmtEur(d.estimated_expense)}</td>
           <td class="px-3 py-3 text-right tabular-nums">
             <input
@@ -433,6 +433,26 @@ document.getElementById("config-save").addEventListener("click", async () => {
   });
   modal.classList.add("hidden");
   await loadAll();
+});
+
+document.getElementById("config-reset").addEventListener("click", async () => {
+  const confirm1 = confirm(
+    "¿Seguro? Esto borra TODOS los documentos, los montos del checklist y las actividades del itinerario."
+  );
+  if (!confirm1) return;
+  const confirm2 = prompt('Escribí "EMPEZAR" para confirmar:');
+  if (confirm2 !== "EMPEZAR") return;
+  try {
+    const res = await api("/checklist/reset-all", { method: "POST" });
+    alert(
+      `Listo. Borré ${res.documents_deleted} documentos, ${res.files_removed} archivos, ` +
+      `reseteé ${res.checklist_reset} items del checklist y ${res.itinerary_reset} días del itinerario.`
+    );
+    modal.classList.add("hidden");
+    await loadAll();
+  } catch (err) {
+    alert("Error: " + err.message);
+  }
 });
 
 // -- boot -------------------------------------------------------------------

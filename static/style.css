@@ -156,3 +156,13 @@ body {
   background: rgb(15, 23, 42);
   outline: none;
 }
+
+.activity-cell {
+  white-space: pre-wrap;
+  min-width: 14rem;
+  color: #cbd5e1;
+}
+.activity-cell:empty::before {
+  content: "—";
+  color: #475569;
+}

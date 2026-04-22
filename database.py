@@ -91,29 +91,33 @@ CREATE TABLE IF NOT EXISTS pending_confirmations (
 """
 
 
+# Base de €40/día para comida y cosas del día a día. Las actividades,
+# museos y excursiones las va cargando Felipe vía el bot o el dashboard.
+DAILY_FOOD_BASE = 40.0
+
 ITINERARY_SEED = [
-    (1, "2026-07-25", "En vuelo", "Salida EZE noche", 0),
-    (2, "2026-07-26", "Escala NYC", "Escala JFK", 13),
-    (3, "2026-07-27", "Barcelona", "Llegada BCN, reencuentro", 5),
-    (4, "2026-07-28", "Barcelona", "Día libre + vuelo nocturno Roma 21:45", 5),
-    (5, "2026-07-29", "Roma", "Llegada 01:45, Audiencia Papal 10h", 15),
-    (6, "2026-07-30", "Roma", "Coliseo + Foro Romano", 35),
-    (7, "2026-07-31", "Roma", "Trevi + Pantheon + vuelo 18:10 BCN", 15),
-    (8, "2026-08-01", "Barcelona", "Llegada 20h, descanso", 5),
-    (9, "2026-08-02", "Barcelona", "Playa Barceloneta", 2),
-    (10, "2026-08-03", "Madrid", "Tren BCN→MAD, llegada", 40),
-    (11, "2026-08-04", "Madrid", "Museo Legends + Tour Bernabéu", 76),
-    (12, "2026-08-05", "Madrid", "Retiro + Reina Sofía gratis", 20),
-    (13, "2026-08-06", "Barcelona", "El Rastro + tren MAD→BCN", 40),
-    (14, "2026-08-07", "Barcelona", "Descanso post-Madrid", 2),
-    (15, "2026-08-08", "Barcelona", "Bunkers del Carmel", 2),
-    (16, "2026-08-09", "Barcelona", "Escapada Montserrat", 33),
-    (17, "2026-08-10", "Barcelona", "Sagrada Família exterior", 2),
-    (18, "2026-08-11", "Barcelona", "Poblenou", 3),
-    (19, "2026-08-12", "Barcelona", "Escapada Sitges", 13),
-    (20, "2026-08-13", "Barcelona", "Park Güell", 2),
-    (21, "2026-08-14", "Barcelona", "Último día libre", 10),
-    (22, "2026-08-15", "Barcelona", "Vuelo regreso EZE", 5),
+    (1, "2026-07-25", "En vuelo", "", DAILY_FOOD_BASE),
+    (2, "2026-07-26", "Escala NYC", "", DAILY_FOOD_BASE),
+    (3, "2026-07-27", "Barcelona", "", DAILY_FOOD_BASE),
+    (4, "2026-07-28", "Barcelona", "", DAILY_FOOD_BASE),
+    (5, "2026-07-29", "Roma", "", DAILY_FOOD_BASE),
+    (6, "2026-07-30", "Roma", "", DAILY_FOOD_BASE),
+    (7, "2026-07-31", "Roma", "", DAILY_FOOD_BASE),
+    (8, "2026-08-01", "Barcelona", "", DAILY_FOOD_BASE),
+    (9, "2026-08-02", "Barcelona", "", DAILY_FOOD_BASE),
+    (10, "2026-08-03", "Madrid", "", DAILY_FOOD_BASE),
+    (11, "2026-08-04", "Madrid", "", DAILY_FOOD_BASE),
+    (12, "2026-08-05", "Madrid", "", DAILY_FOOD_BASE),
+    (13, "2026-08-06", "Barcelona", "", DAILY_FOOD_BASE),
+    (14, "2026-08-07", "Barcelona", "", DAILY_FOOD_BASE),
+    (15, "2026-08-08", "Barcelona", "", DAILY_FOOD_BASE),
+    (16, "2026-08-09", "Barcelona", "", DAILY_FOOD_BASE),
+    (17, "2026-08-10", "Barcelona", "", DAILY_FOOD_BASE),
+    (18, "2026-08-11", "Barcelona", "", DAILY_FOOD_BASE),
+    (19, "2026-08-12", "Barcelona", "", DAILY_FOOD_BASE),
+    (20, "2026-08-13", "Barcelona", "", DAILY_FOOD_BASE),
+    (21, "2026-08-14", "Barcelona", "", DAILY_FOOD_BASE),
+    (22, "2026-08-15", "Barcelona", "", DAILY_FOOD_BASE),
 ]
 
 
@@ -131,14 +135,14 @@ CHECKLIST_SEED = [
     ("Bus Roma Vaticano→FCO", "31-jul 15:00", None, "pending", None),
     ("Hotel Roma Grand Hotel Olympic", "29-31 jul", None, "pending", None),
     ("Hotel Madrid Colectia Stays Atocha", "3-6 ago", None, "pending", None),
-    ("Audiencia Papal Vaticano", "29-jul · GRATIS · pendiente reserva", 0, "pending", None),
-    ("Coliseo + Foro Romano", "30-jul", 18, "pending", None),
-    ("Tour Bernabéu", "4-ago", 35, "pending", None),
-    ("Museo Legends Madrid", "4-ago", 28, "pending", None),
-    ("Montserrat FGC + cremallera", "9-ago", 25, "pending", None),
-    ("T-Jove Barcelona", "Transporte en Barcelona", 40, "pending", None),
-    ("Bono metro Madrid", "Transporte en Madrid", 12, "pending", None),
-    ("eSIM Europa", "Datos móviles", 15, "pending", None),
+    ("Audiencia Papal Vaticano", "29-jul · GRATIS · pendiente reserva", None, "pending", None),
+    ("Coliseo + Foro Romano", "30-jul", None, "pending", None),
+    ("Tour Bernabéu", "4-ago", None, "pending", None),
+    ("Museo Legends Madrid", "4-ago", None, "pending", None),
+    ("Montserrat FGC + cremallera", "9-ago", None, "pending", None),
+    ("T-Jove Barcelona", "Transporte en Barcelona", None, "pending", None),
+    ("Bono metro Madrid", "Transporte en Madrid", None, "pending", None),
+    ("eSIM Europa", "Datos móviles", None, "pending", None),
 ]
 
 
@@ -215,3 +219,60 @@ def reset_paid_items() -> int:
                WHERE status = 'paid'"""
         )
         return cur.rowcount
+
+
+def reset_all_data() -> dict:
+    """Wipe documents + pending confirmations, clear all checklist amounts and
+    itinerary activities/real expenses. Keep the structure (days, cities,
+    checklist items) so the bot can re-fill everything from scratch.
+
+    Returns a summary with row counts.
+    """
+    uploads_dir = Path(os.getenv("UPLOADS_PATH", "uploads"))
+    removed_files = 0
+    with get_db() as conn:
+        paths = [
+            row["file_path"]
+            for row in conn.execute("SELECT file_path FROM documents").fetchall()
+        ]
+        for p in paths:
+            try:
+                Path(p).unlink(missing_ok=True)
+                removed_files += 1
+            except OSError:
+                pass
+
+        docs_cur = conn.execute("DELETE FROM documents")
+        pend_cur = conn.execute("DELETE FROM pending_confirmations")
+        ch_cur = conn.execute(
+            """UPDATE checklist
+               SET status = 'pending',
+                   paid_date = NULL,
+                   amount_eur = NULL"""
+        )
+        it_cur = conn.execute(
+            """UPDATE itinerary
+               SET activity = '',
+                   estimated_expense = 40,
+                   real_expense = NULL,
+                   status = 'empty',
+                   notes = NULL"""
+        )
+
+    # If the uploads dir is now empty, leave it be (it's fine).
+    if uploads_dir.exists():
+        try:
+            for stray in uploads_dir.iterdir():
+                if stray.is_file():
+                    stray.unlink(missing_ok=True)
+                    removed_files += 1
+        except OSError:
+            pass
+
+    return {
+        "documents_deleted": docs_cur.rowcount,
+        "pending_cleared": pend_cur.rowcount,
+        "checklist_reset": ch_cur.rowcount,
+        "itinerary_reset": it_cur.rowcount,
+        "files_removed": removed_files,
+    }

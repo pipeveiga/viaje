@@ -6,7 +6,7 @@ from datetime import date
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from database import get_db, reset_paid_items
+from database import get_db, reset_all_data, reset_paid_items
 
 router = APIRouter(prefix="/api/checklist", tags=["checklist"])
 
@@ -47,6 +47,15 @@ def reset_paid():
     """
     n = reset_paid_items()
     return {"reset": n}
+
+
+@router.post("/reset-all")
+def reset_all():
+    """Wipe all user-entered data: documents, checklist amounts, itinerary
+    activities, real expenses. Keeps the structural seed (days, cities,
+    checklist items) intact so the bot can rebuild from zero.
+    """
+    return reset_all_data()
 
 
 @router.put("/{item_id}")

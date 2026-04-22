@@ -35,7 +35,7 @@ from telegram.ext import (
     filters,
 )
 
-from ai_processor import answer_question, process_document
+from ai_processor import answer_question, classify_intent, process_document
 from database import get_config, get_db, init_db
 
 logging.basicConfig(
@@ -67,16 +67,16 @@ async def _guard(update: Update) -> bool:
 
 
 HELP_TEXT = (
-    "✈️ *TripDesk Bot*\n\n"
-    "Comandos rápidos:\n"
-    "• /resumen — resumen financiero del viaje\n"
-    "• /hoy — plan del día actual\n"
-    "• /pendientes — pagos pendientes del checklist\n\n"
-    "📎 Mandame fotos o PDFs de facturas, reservas o tickets y los proceso"
-    " automáticamente (te pido SI/NO antes de guardar).\n\n"
-    "💬 Y escribime cualquier pregunta sobre el viaje (ej: _\"cuánto me queda"
-    " por pagar?\"_, _\"qué hago el 4-ago?\"_, _\"en qué hotel me quedo en"
-    " Roma?\"_) y te contesto con la info del itinerario."
+    "✈️ Hola Feli! Soy *TripDesk*, te acompaño a armar Europa 2026.\n\n"
+    "Mandame todo lo que vayas pagando, reservando o encontrando:\n"
+    "📎 *Fotos o PDFs* (tickets, facturas, reservas) y los cargo solos.\n"
+    "💬 O contame con tus palabras — ej: _\"reservé el Coliseo para el 30-jul\"_,"
+    " _\"pagué €450 del hotel de Roma\"_, _\"quiero ir a Montjuïc el 10-ago\"_.\n"
+    "❓ También me podés preguntar cualquier cosa del viaje y te contesto con"
+    " lo que ya cargamos.\n\n"
+    "Atajos útiles: /resumen · /hoy · /pendientes.\n\n"
+    "Cuando te proponga algo (guardar, marcar pagado, agregar actividad) te"
+    " pregunto SI/NO antes de tocar nada. Dale cuando quieras 🚀"
 )
 
 
@@ -130,15 +130,16 @@ async def cmd_hoy(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
             "No hay plan para hoy en el itinerario (probablemente el viaje no empezó o ya terminó)."
         )
         return
-    text = (
-        f"📅 *Día {row['day_number']}* — {row['date']}\n"
-        f"📍 {row['city']}\n"
-        f"🎯 {row['activity']}\n"
-        f"💶 Estimado: €{row['estimated_expense']:.2f}"
-    )
+    parts = [
+        f"📅 *Día {row['day_number']}* — {row['date']}",
+        f"📍 {row['city']}",
+    ]
+    if row["activity"]:
+        parts.append(f"🎯 {row['activity']}")
+    parts.append(f"💶 Estimado: €{row['estimated_expense']:.2f}")
     if row["real_expense"] is not None:
-        text += f"\n💰 Real: €{row['real_expense']:.2f}"
-    await update.message.reply_text(text, parse_mode="Markdown")
+        parts.append(f"💰 Real: €{row['real_expense']:.2f}")
+    await update.message.reply_text("\n".join(parts), parse_mode="Markdown")
 
 
 async def cmd_pendientes(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -164,6 +165,8 @@ async def cmd_pendientes(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _save_pending(chat_id: str, data: dict) -> int:
+    # Default kind for backwards compatibility with existing document payloads.
+    data.setdefault("kind", "document")
     with get_db() as conn:
         cur = conn.execute(
             "INSERT INTO pending_confirmations (chat_id, data_json) VALUES (?, ?)",
@@ -234,13 +237,37 @@ def _find_duplicate(reservation_number: str | None) -> dict | None:
         return None
     with get_db() as conn:
         row = conn.execute(
-            """SELECT id, description, amount_eur, checklist_id
+            """SELECT id, description, amount_eur, amount_usd, checklist_id
                FROM documents
                WHERE confirmed = 1 AND reservation_number = ?
                ORDER BY id DESC LIMIT 1""",
             (reservation_number,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def _append_activity(conn, day_number: int, description: str, amount_eur: float | None) -> None:
+    """Append a short activity line to the day's activity column and bump
+    the estimated_expense by amount_eur (if provided).
+    """
+    row = conn.execute(
+        "SELECT activity, estimated_expense FROM itinerary WHERE day_number = ?",
+        (day_number,),
+    ).fetchone()
+    if not row:
+        return
+    current_text = row["activity"] or ""
+    label = description.strip()
+    if amount_eur:
+        label = f"{label} (€{amount_eur:.2f})"
+    new_text = f"{current_text}\n• {label}".strip() if current_text else f"• {label}"
+    new_estimated = float(row["estimated_expense"] or 0) + float(amount_eur or 0)
+    conn.execute(
+        """UPDATE itinerary
+           SET activity = ?, estimated_expense = ?
+           WHERE day_number = ?""",
+        (new_text, new_estimated, day_number),
+    )
 
 
 async def handle_document_or_photo(
@@ -392,53 +419,197 @@ async def handle_document_or_photo(
         amount_str = "s/d"
 
     concept_by_id = {c["id"]: c["concept"] for c in checklist_items}
-    checklist_lines = []
+    effect_lines = []
     if is_duplicate:
         dup_desc = dup["description"] if dup else None
-        checklist_lines.append(
-            f"🔁 Duplicado de documento previo"
+        effect_lines.append(
+            "🔁 Ya tenía este comprobante cargado"
             + (f" ({dup_desc})" if dup_desc else "")
+            + ". Lo sumo como respaldo."
         )
         if checklist_id:
             name = concept_by_id.get(checklist_id)
-            if name:
-                checklist_lines.append(
-                    f"📝 Se actualizará el monto de: {name}"
+            if name and per_leg_eur is not None:
+                effect_lines.append(
+                    f"📝 Completo el importe de *{name}* con €{per_leg_eur:.2f}"
                 )
         if checklist_id_vuelta:
             name = concept_by_id.get(checklist_id_vuelta)
-            if name:
-                checklist_lines.append(
-                    f"📝 Se actualizará el monto de: {name}"
+            if name and per_leg_eur is not None:
+                effect_lines.append(
+                    f"📝 Completo el importe de *{name}* con €{per_leg_eur:.2f}"
                 )
     else:
         if checklist_id:
             name = concept_by_id.get(checklist_id)
             if name:
-                checklist_lines.append(f"✅ Se marcará como pagado: {name}")
+                effect_lines.append(f"✅ Marco *{name}* como pagado")
         if checklist_id_vuelta:
             name = concept_by_id.get(checklist_id_vuelta)
             if name:
-                checklist_lines.append(f"✅ Se marcará como pagado: {name}")
-    checklist_block = ("\n" + "\n".join(checklist_lines)) if checklist_lines else ""
+                effect_lines.append(f"✅ Marco *{name}* como pagado")
+        if payload["day_number"] and not is_roundtrip and not checklist_id:
+            effect_lines.append(
+                f"📅 Lo sumo al día {payload['day_number']} del itinerario"
+            )
 
-    day_line = ""
-    if payload["day_number"] and not is_roundtrip and not is_duplicate and not checklist_id:
-        day_line = f"\n📅 Se agregará al día {payload['day_number']} del itinerario"
+    effects_block = ("\n" + "\n".join(effect_lines)) if effect_lines else ""
 
     roundtrip_tag = " (ida y vuelta)" if is_roundtrip else ""
-    dup_tag = " [duplicado]" if is_duplicate else ""
 
     summary = (
-        f"🔍 *Detecté:*\n"
-        f"📄 {payload['description'] or 'documento'}{roundtrip_tag}{dup_tag}\n"
-        f"📆 Fecha: {payload['date'] or 's/d'}\n"
-        f"💶 Monto: {amount_str}\n"
-        f"🏷️ Tipo: {payload['doc_type'] or 'otro'}"
-        f"{checklist_block}{day_line}\n\n"
-        "¿Es correcto? Respondé *SI* para confirmar o *NO* para cancelar."
+        f"Vi esto 👀\n"
+        f"📄 {payload['description'] or 'documento'}{roundtrip_tag}\n"
+        f"📆 {payload['date'] or 'sin fecha'}"
+        f"{'  ·  🏷️ ' + payload['doc_type'] if payload['doc_type'] else ''}\n"
+        f"💶 {amount_str}"
+        f"{effects_block}\n\n"
+        "¿Lo guardo? *SI* / *NO*"
     )
     await msg.reply_text(summary, parse_mode="Markdown")
+
+
+async def _apply_confirmed_action(data: dict) -> str:
+    """Persist a pending action previously proposed to the user.
+
+    The payload's `kind` drives behavior:
+    - "document": a receipt that the user wants saved.
+    - "activity": add an activity to a day of the itinerary.
+    - "mark_paid": mark a checklist item as paid, optionally with an amount.
+    """
+    kind = data.get("kind", "document")
+
+    if kind == "activity":
+        day = data.get("day_number")
+        description = data.get("description") or "actividad"
+        amount_eur = data.get("amount_eur")
+        if not day:
+            return "⚠️ No pude guardar la actividad: faltó el día."
+        with get_db() as conn:
+            _append_activity(conn, int(day), description, amount_eur)
+        extra = f" (€{amount_eur:.2f})" if amount_eur else ""
+        return f"Listo, anoté *{description}*{extra} en el día {day}. 📌"
+
+    if kind == "mark_paid":
+        cid = data.get("checklist_id")
+        concept = data.get("concept") or "item"
+        amount_eur = data.get("amount_eur")
+        if not cid:
+            return "⚠️ No encontré el item del checklist."
+        today_iso = datetime.now().date().isoformat()
+        with get_db() as conn:
+            if amount_eur is not None:
+                conn.execute(
+                    """UPDATE checklist
+                       SET status = 'paid', paid_date = ?, amount_eur = ?
+                       WHERE id = ?""",
+                    (today_iso, amount_eur, cid),
+                )
+            else:
+                conn.execute(
+                    """UPDATE checklist
+                       SET status = 'paid', paid_date = ?
+                       WHERE id = ?""",
+                    (today_iso, cid),
+                )
+        extra = f" con €{amount_eur:.2f}" if amount_eur else ""
+        return f"Dale, marqué *{concept}* como pagado{extra}. ✅"
+
+    # -- document ----------------------------------------------------------
+    today_iso = datetime.now().date().isoformat()
+    per_leg_eur = data.get("amount_eur")
+    per_leg_usd = data.get("amount_usd")
+    total_eur = data.get("amount_total_eur")
+    total_usd = data.get("amount_total_usd")
+    is_roundtrip = bool(data.get("is_roundtrip"))
+    is_duplicate = bool(data.get("is_duplicate"))
+    dup_doc_id = data.get("duplicate_of_doc_id")
+
+    doc_eur = total_eur if is_roundtrip else per_leg_eur
+    doc_usd = total_usd if is_roundtrip else per_leg_usd
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO documents
+               (filename, file_path, doc_type, description, amount_eur,
+                amount_usd, date, provider, reservation_number, day_number,
+                checklist_id, confidence, confirmed)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+            (
+                data["filename"],
+                data["file_path"],
+                data["doc_type"],
+                data["description"],
+                doc_eur,
+                doc_usd,
+                data["date"],
+                data["provider"],
+                data["reservation_number"],
+                data["day_number"],
+                data["checklist_id"],
+                data["confidence"],
+            ),
+        )
+
+        # Si el doc previo no tenía monto (p.ej. ticket sin precio), lo
+        # completamos con el de este (suele ser la factura real).
+        if is_duplicate and dup_doc_id and doc_eur is not None:
+            conn.execute(
+                """UPDATE documents
+                   SET amount_eur = COALESCE(amount_eur, ?),
+                       amount_usd = COALESCE(amount_usd, ?)
+                   WHERE id = ?""",
+                (doc_eur, doc_usd, dup_doc_id),
+            )
+
+        for cid in (data.get("checklist_id"), data.get("checklist_id_vuelta")):
+            if not cid:
+                continue
+            if is_duplicate:
+                # Mantener el status pagado del item; completar el importe si
+                # el nuevo doc trae uno (y el anterior no lo tenía o era menor).
+                if per_leg_eur is not None:
+                    conn.execute(
+                        """UPDATE checklist
+                           SET amount_eur = ?,
+                               status = 'paid',
+                               paid_date = COALESCE(paid_date, ?)
+                           WHERE id = ?""",
+                        (per_leg_eur, today_iso, cid),
+                    )
+                continue
+            if per_leg_eur is not None:
+                conn.execute(
+                    """UPDATE checklist
+                       SET status = 'paid', paid_date = ?, amount_eur = ?
+                       WHERE id = ?""",
+                    (today_iso, per_leg_eur, cid),
+                )
+            else:
+                conn.execute(
+                    """UPDATE checklist SET status = 'paid', paid_date = ?
+                       WHERE id = ?""",
+                    (today_iso, cid),
+                )
+
+        # Si el doc matchea un día pero NO un item del checklist → es una
+        # actividad del viaje, la sumamos al día.
+        if (
+            not is_roundtrip
+            and not is_duplicate
+            and not data.get("checklist_id")
+            and data.get("day_number")
+        ):
+            _append_activity(
+                conn,
+                int(data["day_number"]),
+                data.get("description") or "gasto",
+                per_leg_eur,
+            )
+
+    if is_duplicate:
+        return "Perfecto, lo guardé como respaldo y te completé el importe si faltaba. 🙌"
+    return "Listo, lo guardé y actualicé la app 🙌"
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -446,116 +617,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     text = (update.message.text or "").strip().lower()
 
-    if text in {"si", "sí", "s", "yes", "y"}:
+    if text in {"si", "sí", "s", "yes", "y", "dale", "ok", "okay"}:
         data = _consume_pending(str(update.message.chat_id))
         if not data:
-            await update.message.reply_text("No hay nada pendiente de confirmar.")
+            await update.message.reply_text(
+                "No tengo nada pendiente. Mandame un comprobante o contame qué querés anotar."
+            )
             return
-
-        today_iso = datetime.now().date().isoformat()
-        per_leg_eur = data.get("amount_eur")
-        per_leg_usd = data.get("amount_usd")
-        total_eur = data.get("amount_total_eur")
-        total_usd = data.get("amount_total_usd")
-        is_roundtrip = bool(data.get("is_roundtrip"))
-        is_duplicate = bool(data.get("is_duplicate"))
-
-        doc_eur = total_eur if is_roundtrip else per_leg_eur
-        doc_usd = total_usd if is_roundtrip else per_leg_usd
-
-        with get_db() as conn:
-            conn.execute(
-                """INSERT INTO documents
-                   (filename, file_path, doc_type, description, amount_eur,
-                    amount_usd, date, provider, reservation_number, day_number,
-                    checklist_id, confidence, confirmed)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
-                (
-                    data["filename"],
-                    data["file_path"],
-                    data["doc_type"],
-                    data["description"],
-                    doc_eur,
-                    doc_usd,
-                    data["date"],
-                    data["provider"],
-                    data["reservation_number"],
-                    data["day_number"],
-                    data["checklist_id"],
-                    data["confidence"],
-                ),
-            )
-
-            for cid in (data.get("checklist_id"), data.get("checklist_id_vuelta")):
-                if not cid:
-                    continue
-                if is_duplicate:
-                    # El doc original ya marcó el item como pagado. Si el nuevo
-                    # doc tiene un monto (factura real), actualizamos el importe
-                    # del checklist; no cambiamos status ni paid_date.
-                    if per_leg_eur is not None:
-                        conn.execute(
-                            "UPDATE checklist SET amount_eur = ? WHERE id = ?",
-                            (per_leg_eur, cid),
-                        )
-                    continue
-                if per_leg_eur is not None:
-                    conn.execute(
-                        """UPDATE checklist
-                           SET status = 'paid', paid_date = ?, amount_eur = ?
-                           WHERE id = ?""",
-                        (today_iso, per_leg_eur, cid),
-                    )
-                else:
-                    conn.execute(
-                        """UPDATE checklist SET status = 'paid', paid_date = ?
-                           WHERE id = ?""",
-                        (today_iso, cid),
-                    )
-
-            # Gastos del día: solo si el doc NO es un pago anticipado (no matchea
-            # checklist), no es ida y vuelta y no es un duplicado.
-            should_touch_itinerary = (
-                not is_roundtrip
-                and not is_duplicate
-                and not data.get("checklist_id")
-                and data.get("day_number")
-                and per_leg_eur is not None
-            )
-            if should_touch_itinerary:
-                row = conn.execute(
-                    "SELECT real_expense FROM itinerary WHERE day_number = ?",
-                    (data["day_number"],),
-                ).fetchone()
-                current = (row["real_expense"] or 0) if row else 0
-                new_value = current + float(per_leg_eur)
-                conn.execute(
-                    """UPDATE itinerary
-                       SET real_expense = ?, status = 'completed'
-                       WHERE day_number = ?""",
-                    (new_value, data["day_number"]),
-                )
-
-        if is_duplicate:
-            await update.message.reply_text(
-                "✅ Guardado como respaldo. No volví a marcar el pago (ya estaba confirmado)."
-            )
-        else:
-            await update.message.reply_text(
-                "✅ Guardado. Todo actualizado en la app."
-            )
+        reply = await _apply_confirmed_action(data)
+        await update.message.reply_text(reply, parse_mode="Markdown")
         return
 
-    if text in {"no", "n", "cancel", "cancelar"}:
+    if text in {"no", "n", "cancel", "cancelar", "nada", "anula"}:
         consumed = _consume_pending(str(update.message.chat_id))
         if consumed:
-            try:
-                Path(consumed["file_path"]).unlink(missing_ok=True)
-            except OSError:
-                pass
-            await update.message.reply_text("❌ Cancelado. No se guardó nada.")
+            if consumed.get("kind", "document") == "document":
+                try:
+                    Path(consumed["file_path"]).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            await update.message.reply_text("Listo, lo descarto. Seguimos.")
         else:
-            await update.message.reply_text("No hay nada pendiente de confirmar.")
+            await update.message.reply_text("No tenía nada pendiente para cancelar igual.")
         return
 
     # Cualquier otro texto → Q&A con OpenAI usando el contexto del viaje.
@@ -570,12 +653,99 @@ async def _answer_free_text(
     )
     try:
         context_block = _build_trip_context()
-        answer = answer_question(update.message.text, context_block)
+        result = classify_intent(update.message.text, context_block)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Q&A failed")
-        await update.message.reply_text(f"⚠️ No pude contestar: {exc}")
+        logger.exception("intent classification failed")
+        # fallback a Q&A plano
+        try:
+            answer = answer_question(update.message.text, _build_trip_context())
+        except Exception as exc2:  # noqa: BLE001
+            logger.exception("Q&A fallback failed")
+            await update.message.reply_text(f"⚠️ Se me trabó: {exc2}")
+            return
+        await update.message.reply_text(answer)
         return
-    await update.message.reply_text(answer)
+
+    reply = (result.get("reply") or "").strip()
+    action = result.get("action")
+
+    if not action:
+        await update.message.reply_text(reply or "Dale, contame más 🙂")
+        return
+
+    pending, confirm_prompt = _build_pending_from_action(action)
+    if not pending:
+        # la acción vino incompleta → sólo contestamos conversacional
+        await update.message.reply_text(reply or "Dale, contame más 🙂")
+        return
+
+    _save_pending(str(update.message.chat_id), pending)
+    full = reply.rstrip()
+    if full and not full.endswith(("?", ".", "!")):
+        full += "."
+    full = f"{full}\n\n{confirm_prompt}" if full else confirm_prompt
+    await update.message.reply_text(full, parse_mode="Markdown")
+
+
+def _build_pending_from_action(action: dict) -> tuple[dict | None, str]:
+    """Translate an LLM-suggested action into a pending_confirmations payload
+    and a human confirmation prompt. Returns (None, "") if incomplete.
+    """
+    kind = action.get("type")
+    if kind == "add_activity":
+        day = action.get("day_number")
+        description = (action.get("description") or "").strip()
+        amount_eur = action.get("amount_eur")
+        if not day or not description:
+            return None, ""
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT date, city FROM itinerary WHERE day_number = ?",
+                (int(day),),
+            ).fetchone()
+        day_meta = f" ({row['date']} · {row['city']})" if row else ""
+        price_part = f" · €{float(amount_eur):.2f}" if amount_eur else ""
+        prompt = (
+            f"¿Te lo anoto? 👉 *{description}* en el día {day}{day_meta}{price_part}\n"
+            "Respondé *SI* para guardar o *NO* para dejarlo."
+        )
+        return (
+            {
+                "kind": "activity",
+                "day_number": int(day),
+                "description": description,
+                "amount_eur": float(amount_eur) if amount_eur else None,
+            },
+            prompt,
+        )
+
+    if kind == "mark_paid":
+        concept_hint = (action.get("checklist_concept") or "").strip()
+        amount_eur = action.get("amount_eur")
+        cid = _match_checklist(concept_hint, include_paid=False)
+        if not cid:
+            return None, ""
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT concept FROM checklist WHERE id = ?", (cid,)
+            ).fetchone()
+        concept = row["concept"] if row else concept_hint
+        price_part = f" con €{float(amount_eur):.2f}" if amount_eur else ""
+        prompt = (
+            f"¿Marco *{concept}* como pagado{price_part}?\n"
+            "Respondé *SI* o *NO*."
+        )
+        return (
+            {
+                "kind": "mark_paid",
+                "checklist_id": cid,
+                "concept": concept,
+                "amount_eur": float(amount_eur) if amount_eur else None,
+            },
+            prompt,
+        )
+
+    return None, ""
 
 
 def _build_trip_context() -> str:
