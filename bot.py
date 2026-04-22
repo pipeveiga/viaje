@@ -188,6 +188,46 @@ def _consume_pending(chat_id: str) -> dict | None:
         return json.loads(row["data_json"])
 
 
+def _peek_pending(chat_id: str) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT data_json FROM pending_confirmations
+               WHERE chat_id = ? ORDER BY id DESC LIMIT 1""",
+            (str(chat_id),),
+        ).fetchone()
+    return json.loads(row["data_json"]) if row else None
+
+
+def _record_turn(chat_id: str, role: str, content: str) -> None:
+    if not content:
+        return
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO conversation_turns (chat_id, role, content) VALUES (?, ?, ?)",
+            (str(chat_id), role, content),
+        )
+        # Mantener solo las últimas 40 entradas por chat para que no crezca.
+        conn.execute(
+            """DELETE FROM conversation_turns
+               WHERE chat_id = ?
+                 AND id NOT IN (
+                   SELECT id FROM conversation_turns
+                   WHERE chat_id = ? ORDER BY id DESC LIMIT 40
+                 )""",
+            (str(chat_id), str(chat_id)),
+        )
+
+
+def _recent_turns(chat_id: str, n: int = 8) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT role, content FROM conversation_turns
+               WHERE chat_id = ? ORDER BY id DESC LIMIT ?""",
+            (str(chat_id), n),
+        ).fetchall()
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+
 def _match_checklist(name_hint: str | None, include_paid: bool = False) -> int | None:
     if not name_hint:
         return None
@@ -466,6 +506,8 @@ async def handle_document_or_photo(
         f"{effects_block}\n\n"
         "¿Lo guardo? *SI* / *NO*"
     )
+    _record_turn(str(msg.chat_id), "user", f"[comprobante enviado: {filename}]")
+    _record_turn(str(msg.chat_id), "assistant", summary)
     await msg.reply_text(summary, parse_mode="Markdown")
 
 
@@ -514,6 +556,41 @@ async def _apply_confirmed_action(data: dict) -> str:
                 )
         extra = f" con €{amount_eur:.2f}" if amount_eur else ""
         return f"Dale, marqué *{concept}* como pagado{extra}. ✅"
+
+    if kind == "update_checklist_amount":
+        cid = data.get("checklist_id")
+        concept = data.get("concept") or "item"
+        amount_eur = data.get("amount_eur")
+        if not cid or amount_eur is None:
+            return "⚠️ Me faltó algún dato para corregir el importe."
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE checklist SET amount_eur = ? WHERE id = ?",
+                (float(amount_eur), cid),
+            )
+        return f"Corregido: *{concept}* ahora figura en €{float(amount_eur):.2f}. ✏️"
+
+    if kind == "mark_paid_roundtrip":
+        cid_ida = data.get("checklist_id_ida")
+        cid_vuelta = data.get("checklist_id_vuelta")
+        per_leg = data.get("per_leg_eur")
+        concept_ida = data.get("concept_ida") or "ida"
+        concept_vuelta = data.get("concept_vuelta") or "vuelta"
+        today_iso = datetime.now().date().isoformat()
+        with get_db() as conn:
+            for cid in (cid_ida, cid_vuelta):
+                if not cid:
+                    continue
+                conn.execute(
+                    """UPDATE checklist
+                       SET status = 'paid', paid_date = ?, amount_eur = ?
+                       WHERE id = ?""",
+                    (today_iso, per_leg, cid),
+                )
+        return (
+            f"Marqué *{concept_ida}* y *{concept_vuelta}* como pagados a "
+            f"€{float(per_leg):.2f} c/u. ✅"
+        )
 
     # -- document ----------------------------------------------------------
     today_iso = datetime.now().date().isoformat()
@@ -612,36 +689,41 @@ async def _apply_confirmed_action(data: dict) -> str:
     return "Listo, lo guardé y actualicé la app 🙌"
 
 
+SI_WORDS = {"si", "sí", "s", "yes", "y", "dale", "ok", "okay", "listo", "hazlo", "hacelo"}
+NO_WORDS = {"no", "n", "cancel", "cancelar", "nada", "anula", "anulá"}
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard(update):
         return
-    text = (update.message.text or "").strip().lower()
+    raw = (update.message.text or "").strip()
+    text = raw.lower()
+    chat_id = str(update.message.chat_id)
 
-    if text in {"si", "sí", "s", "yes", "y", "dale", "ok", "okay"}:
-        data = _consume_pending(str(update.message.chat_id))
-        if not data:
-            await update.message.reply_text(
-                "No tengo nada pendiente. Mandame un comprobante o contame qué querés anotar."
-            )
-            return
+    _record_turn(chat_id, "user", raw)
+
+    has_pending = _peek_pending(chat_id) is not None
+
+    if has_pending and text in SI_WORDS:
+        data = _consume_pending(chat_id)
         reply = await _apply_confirmed_action(data)
+        _record_turn(chat_id, "assistant", reply)
         await update.message.reply_text(reply, parse_mode="Markdown")
         return
 
-    if text in {"no", "n", "cancel", "cancelar", "nada", "anula"}:
-        consumed = _consume_pending(str(update.message.chat_id))
-        if consumed:
-            if consumed.get("kind", "document") == "document":
-                try:
-                    Path(consumed["file_path"]).unlink(missing_ok=True)
-                except OSError:
-                    pass
-            await update.message.reply_text("Listo, lo descarto. Seguimos.")
-        else:
-            await update.message.reply_text("No tenía nada pendiente para cancelar igual.")
+    if has_pending and text in NO_WORDS:
+        consumed = _consume_pending(chat_id)
+        if consumed and consumed.get("kind", "document") == "document":
+            try:
+                Path(consumed["file_path"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+        reply = "Listo, lo descarto. Seguimos."
+        _record_turn(chat_id, "assistant", reply)
+        await update.message.reply_text(reply)
         return
 
-    # Cualquier otro texto → Q&A con OpenAI usando el contexto del viaje.
+    # Sin pending → SI/NO y todo lo demás van al modelo con historial.
     await _answer_free_text(update, context)
 
 
@@ -651,18 +733,24 @@ async def _answer_free_text(
     await context.bot.send_chat_action(
         chat_id=update.message.chat_id, action=ChatAction.TYPING
     )
+    chat_id = str(update.message.chat_id)
+    history = _recent_turns(chat_id, n=8)
+    # El último turn ya tiene el mensaje actual; lo sacamos para no duplicarlo.
+    if history and history[-1]["role"] == "user":
+        history = history[:-1]
+
     try:
         context_block = _build_trip_context()
-        result = classify_intent(update.message.text, context_block)
+        result = classify_intent(update.message.text, context_block, history)
     except Exception as exc:  # noqa: BLE001
         logger.exception("intent classification failed")
-        # fallback a Q&A plano
         try:
             answer = answer_question(update.message.text, _build_trip_context())
         except Exception as exc2:  # noqa: BLE001
             logger.exception("Q&A fallback failed")
             await update.message.reply_text(f"⚠️ Se me trabó: {exc2}")
             return
+        _record_turn(chat_id, "assistant", answer)
         await update.message.reply_text(answer)
         return
 
@@ -670,20 +758,24 @@ async def _answer_free_text(
     action = result.get("action")
 
     if not action:
-        await update.message.reply_text(reply or "Dale, contame más 🙂")
+        final = reply or "Dale, contame más."
+        _record_turn(chat_id, "assistant", final)
+        await update.message.reply_text(final)
         return
 
     pending, confirm_prompt = _build_pending_from_action(action)
     if not pending:
-        # la acción vino incompleta → sólo contestamos conversacional
-        await update.message.reply_text(reply or "Dale, contame más 🙂")
+        final = reply or "Dale, contame más."
+        _record_turn(chat_id, "assistant", final)
+        await update.message.reply_text(final)
         return
 
-    _save_pending(str(update.message.chat_id), pending)
+    _save_pending(chat_id, pending)
     full = reply.rstrip()
     if full and not full.endswith(("?", ".", "!")):
         full += "."
     full = f"{full}\n\n{confirm_prompt}" if full else confirm_prompt
+    _record_turn(chat_id, "assistant", full)
     await update.message.reply_text(full, parse_mode="Markdown")
 
 
@@ -741,6 +833,74 @@ def _build_pending_from_action(action: dict) -> tuple[dict | None, str]:
                 "checklist_id": cid,
                 "concept": concept,
                 "amount_eur": float(amount_eur) if amount_eur else None,
+            },
+            prompt,
+        )
+
+    if kind == "update_checklist_amount":
+        concept_hint = (action.get("checklist_concept") or "").strip()
+        amount_eur = action.get("amount_eur")
+        if amount_eur is None:
+            return None, ""
+        cid = _match_checklist(concept_hint, include_paid=True)
+        if not cid:
+            return None, ""
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT concept, amount_eur, status FROM checklist WHERE id = ?",
+                (cid,),
+            ).fetchone()
+        concept = row["concept"] if row else concept_hint
+        old = (
+            f" (estaba en €{row['amount_eur']:.2f})"
+            if row and row["amount_eur"] is not None
+            else ""
+        )
+        prompt = (
+            f"¿Corrijo el importe de *{concept}* a €{float(amount_eur):.2f}{old}?\n"
+            "*SI* / *NO*"
+        )
+        return (
+            {
+                "kind": "update_checklist_amount",
+                "checklist_id": cid,
+                "concept": concept,
+                "amount_eur": float(amount_eur),
+            },
+            prompt,
+        )
+
+    if kind == "mark_paid_roundtrip":
+        concept_ida = (action.get("checklist_concept_ida") or "").strip()
+        concept_vuelta = (action.get("checklist_concept_vuelta") or "").strip()
+        total_eur = action.get("total_eur") or action.get("amount_eur")
+        if not concept_ida or not concept_vuelta or total_eur is None:
+            return None, ""
+        cid_ida = _match_checklist(concept_ida, include_paid=True)
+        cid_vuelta = _match_checklist(concept_vuelta, include_paid=True)
+        if not cid_ida or not cid_vuelta:
+            return None, ""
+        per_leg = round(float(total_eur) / 2, 2)
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT id, concept FROM checklist WHERE id IN (?, ?)",
+                (cid_ida, cid_vuelta),
+            ).fetchall()
+        names = {r["id"]: r["concept"] for r in rows}
+        prompt = (
+            f"Ida y vuelta €{float(total_eur):.2f} → €{per_leg:.2f} c/u.\n"
+            f"¿Marco como pagado *{names.get(cid_ida, concept_ida)}* y "
+            f"*{names.get(cid_vuelta, concept_vuelta)}* con ese importe? *SI* / *NO*"
+        )
+        return (
+            {
+                "kind": "mark_paid_roundtrip",
+                "checklist_id_ida": cid_ida,
+                "checklist_id_vuelta": cid_vuelta,
+                "concept_ida": names.get(cid_ida, concept_ida),
+                "concept_vuelta": names.get(cid_vuelta, concept_vuelta),
+                "per_leg_eur": per_leg,
+                "total_eur": float(total_eur),
             },
             prompt,
         )
