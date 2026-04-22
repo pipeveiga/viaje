@@ -41,6 +41,7 @@ def _current_trip_day(start: str, end: str) -> dict:
 @router.get("/summary")
 def summary():
     rate = float(get_config("eur_usd_rate", "1.172") or "1.172")
+    usd_ars = float(get_config("usd_ars_rate", "1450") or "1450")
     start = get_config("start_date", "2026-07-25") or "2026-07-25"
     end = get_config("end_date", "2026-08-15") or "2026-08-15"
 
@@ -79,6 +80,7 @@ def summary():
 
     return {
         "eur_usd_rate": rate,
+        "usd_ars_rate": usd_ars,
         "trip": {
             **trip_info,
             "start_date": start,

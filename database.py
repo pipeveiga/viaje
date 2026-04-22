@@ -144,6 +144,7 @@ CHECKLIST_SEED = [
 
 CONFIG_SEED = [
     ("eur_usd_rate", os.getenv("EUR_USD_RATE", "1.172")),
+    ("usd_ars_rate", os.getenv("USD_ARS_RATE", "1450")),
     ("trip_name", "Europa 2026"),
     ("traveler", "Felipe Veiga"),
     ("start_date", "2026-07-25"),

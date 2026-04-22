@@ -185,18 +185,62 @@ def _consume_pending(chat_id: str) -> dict | None:
         return json.loads(row["data_json"])
 
 
-def _match_checklist(name_hint: str | None) -> int | None:
+def _match_checklist(name_hint: str | None, include_paid: bool = False) -> int | None:
     if not name_hint:
         return None
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id, concept FROM checklist WHERE status = 'pending'"
-        ).fetchall()
+        if include_paid:
+            rows = conn.execute("SELECT id, concept, status FROM checklist").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, concept, status FROM checklist WHERE status = 'pending'"
+            ).fetchall()
     hint = name_hint.lower()
     for r in rows:
         if r["concept"].lower() in hint or hint in r["concept"].lower():
             return r["id"]
     return None
+
+
+def _get_rates() -> tuple[float, float]:
+    eur_usd = float(get_config("eur_usd_rate", "1.172") or "1.172")
+    usd_ars = float(get_config("usd_ars_rate", "1450") or "1450")
+    return eur_usd, usd_ars
+
+
+def _convert_amounts(
+    amount: float | None, currency: str | None
+) -> tuple[float | None, float | None]:
+    """Convert an amount in its original currency to (EUR, USD) using config rates."""
+    if amount is None:
+        return None, None
+    cur = (currency or "").upper()
+    eur_usd, usd_ars = _get_rates()
+    if cur == "EUR":
+        return round(float(amount), 2), round(float(amount) * eur_usd, 2)
+    if cur == "USD":
+        return round(float(amount) / eur_usd, 2), round(float(amount), 2)
+    if cur == "ARS":
+        usd = float(amount) / usd_ars
+        eur = usd / eur_usd
+        return round(eur, 2), round(usd, 2)
+    # unknown currency: assume it's already EUR so we don't explode
+    return round(float(amount), 2), round(float(amount) * eur_usd, 2)
+
+
+def _find_duplicate(reservation_number: str | None) -> dict | None:
+    """Find a previously confirmed document with the same reservation_number."""
+    if not reservation_number:
+        return None
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT id, description, amount_eur, checklist_id
+               FROM documents
+               WHERE confirmed = 1 AND reservation_number = ?
+               ORDER BY id DESC LIMIT 1""",
+            (reservation_number,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 async def handle_document_or_photo(
@@ -250,62 +294,144 @@ async def handle_document_or_photo(
         return
 
     is_roundtrip = bool(extracted.get("es_ida_vuelta"))
-    checklist_id = _match_checklist(extracted.get("coincide_checklist"))
+    currency = (extracted.get("moneda") or "").upper() or None
+    per_leg_orig = extracted.get("monto_original")
+    total_orig = extracted.get("monto_total_original")
+    if not is_roundtrip and per_leg_orig is None:
+        per_leg_orig = total_orig
+    if not is_roundtrip and total_orig is None:
+        total_orig = per_leg_orig
+
+    per_leg_eur, per_leg_usd = _convert_amounts(per_leg_orig, currency)
+    total_eur, total_usd = _convert_amounts(total_orig, currency)
+
+    # Duplicate detection: same reservation_number already confirmed, or the
+    # matched checklist item is already paid (ticket + factura enviados por separado).
+    reservation_number = extracted.get("numero_reserva")
+    dup = _find_duplicate(reservation_number)
+
+    checklist_id = _match_checklist(
+        extracted.get("coincide_checklist"), include_paid=bool(dup)
+    )
     checklist_id_vuelta = (
-        _match_checklist(extracted.get("coincide_checklist_vuelta"))
+        _match_checklist(
+            extracted.get("coincide_checklist_vuelta"), include_paid=bool(dup)
+        )
         if is_roundtrip
         else None
     )
+
+    is_duplicate = bool(dup)
+    if not is_duplicate and checklist_id:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT status FROM checklist WHERE id = ?", (checklist_id,)
+            ).fetchone()
+            if row and row["status"] == "paid":
+                is_duplicate = True
 
     payload = {
         "filename": filename,
         "file_path": str(dest),
         "doc_type": extracted.get("tipo"),
         "description": extracted.get("descripcion"),
-        "amount_eur": extracted.get("monto_eur"),
-        "amount_total_eur": extracted.get("monto_total_eur"),
-        "amount_usd": extracted.get("monto_usd"),
+        "currency": currency,
+        "amount_original": per_leg_orig,
+        "amount_total_original": total_orig,
+        "amount_eur": per_leg_eur,
+        "amount_total_eur": total_eur,
+        "amount_usd": per_leg_usd,
+        "amount_total_usd": total_usd,
         "date": extracted.get("fecha"),
         "provider": extracted.get("proveedor"),
-        "reservation_number": extracted.get("numero_reserva"),
+        "reservation_number": reservation_number,
         "day_number": extracted.get("dia_viaje"),
         "is_roundtrip": is_roundtrip,
         "checklist_id": checklist_id,
         "checklist_id_vuelta": checklist_id_vuelta,
         "confidence": extracted.get("confianza"),
+        "is_duplicate": is_duplicate,
+        "duplicate_of_doc_id": dup["id"] if dup else None,
     }
     _save_pending(str(msg.chat_id), payload)
 
-    per_leg = payload["amount_eur"]
-    total = payload["amount_total_eur"]
-    if is_roundtrip and per_leg is not None and total is not None:
-        amount_str = f"€{total:.2f} total → €{per_leg:.2f} por tramo (×2)"
-    elif per_leg is not None:
-        amount_str = f"€{per_leg:.2f}"
+    def _fmt_orig(v: float | None) -> str:
+        if v is None:
+            return "s/d"
+        if currency == "ARS":
+            return f"AR${v:,.0f}"
+        if currency == "USD":
+            return f"US${v:,.2f}"
+        if currency == "EUR":
+            return f"€{v:,.2f}"
+        return f"{v:,.2f} {currency or ''}".strip()
+
+    def _fmt_eur_usd(eur: float | None, usd: float | None) -> str:
+        if eur is None and usd is None:
+            return "s/d"
+        parts = []
+        if eur is not None:
+            parts.append(f"€{eur:,.2f}")
+        if usd is not None:
+            parts.append(f"US${usd:,.2f}")
+        return " · ".join(parts)
+
+    if is_roundtrip and per_leg_eur is not None and total_eur is not None:
+        amount_str = (
+            f"{_fmt_orig(total_orig)} total → {_fmt_orig(per_leg_orig)} por tramo (×2)\n"
+            f"💱 Por tramo: {_fmt_eur_usd(per_leg_eur, per_leg_usd)}"
+        )
+    elif per_leg_eur is not None:
+        if currency and currency != "EUR":
+            amount_str = (
+                f"{_fmt_orig(per_leg_orig)} → {_fmt_eur_usd(per_leg_eur, per_leg_usd)}"
+            )
+        else:
+            amount_str = _fmt_eur_usd(per_leg_eur, per_leg_usd)
     else:
         amount_str = "s/d"
 
     concept_by_id = {c["id"]: c["concept"] for c in checklist_items}
     checklist_lines = []
-    if checklist_id:
-        name = concept_by_id.get(checklist_id)
-        if name:
-            checklist_lines.append(f"✅ Se marcará como pagado: {name}")
-    if checklist_id_vuelta:
-        name = concept_by_id.get(checklist_id_vuelta)
-        if name:
-            checklist_lines.append(f"✅ Se marcará como pagado: {name}")
+    if is_duplicate:
+        dup_desc = dup["description"] if dup else None
+        checklist_lines.append(
+            f"🔁 Duplicado de documento previo"
+            + (f" ({dup_desc})" if dup_desc else "")
+        )
+        if checklist_id:
+            name = concept_by_id.get(checklist_id)
+            if name:
+                checklist_lines.append(
+                    f"📝 Se actualizará el monto de: {name}"
+                )
+        if checklist_id_vuelta:
+            name = concept_by_id.get(checklist_id_vuelta)
+            if name:
+                checklist_lines.append(
+                    f"📝 Se actualizará el monto de: {name}"
+                )
+    else:
+        if checklist_id:
+            name = concept_by_id.get(checklist_id)
+            if name:
+                checklist_lines.append(f"✅ Se marcará como pagado: {name}")
+        if checklist_id_vuelta:
+            name = concept_by_id.get(checklist_id_vuelta)
+            if name:
+                checklist_lines.append(f"✅ Se marcará como pagado: {name}")
     checklist_block = ("\n" + "\n".join(checklist_lines)) if checklist_lines else ""
 
     day_line = ""
-    if payload["day_number"] and not is_roundtrip:
+    if payload["day_number"] and not is_roundtrip and not is_duplicate and not checklist_id:
         day_line = f"\n📅 Se agregará al día {payload['day_number']} del itinerario"
 
     roundtrip_tag = " (ida y vuelta)" if is_roundtrip else ""
+    dup_tag = " [duplicado]" if is_duplicate else ""
 
     summary = (
         f"🔍 *Detecté:*\n"
-        f"📄 {payload['description'] or 'documento'}{roundtrip_tag}\n"
+        f"📄 {payload['description'] or 'documento'}{roundtrip_tag}{dup_tag}\n"
         f"📆 Fecha: {payload['date'] or 's/d'}\n"
         f"💶 Monto: {amount_str}\n"
         f"🏷️ Tipo: {payload['doc_type'] or 'otro'}"
@@ -327,8 +453,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
         today_iso = datetime.now().date().isoformat()
-        per_leg = data.get("amount_eur")
+        per_leg_eur = data.get("amount_eur")
+        per_leg_usd = data.get("amount_usd")
+        total_eur = data.get("amount_total_eur")
+        total_usd = data.get("amount_total_usd")
         is_roundtrip = bool(data.get("is_roundtrip"))
+        is_duplicate = bool(data.get("is_duplicate"))
+
+        doc_eur = total_eur if is_roundtrip else per_leg_eur
+        doc_usd = total_usd if is_roundtrip else per_leg_usd
 
         with get_db() as conn:
             conn.execute(
@@ -342,8 +475,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     data["file_path"],
                     data["doc_type"],
                     data["description"],
-                    data.get("amount_total_eur") if is_roundtrip else per_leg,
-                    data["amount_usd"],
+                    doc_eur,
+                    doc_usd,
                     data["date"],
                     data["provider"],
                     data["reservation_number"],
@@ -356,12 +489,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             for cid in (data.get("checklist_id"), data.get("checklist_id_vuelta")):
                 if not cid:
                     continue
-                if per_leg is not None:
+                if is_duplicate:
+                    # El doc original ya marcó el item como pagado. Si el nuevo
+                    # doc tiene un monto (factura real), actualizamos el importe
+                    # del checklist; no cambiamos status ni paid_date.
+                    if per_leg_eur is not None:
+                        conn.execute(
+                            "UPDATE checklist SET amount_eur = ? WHERE id = ?",
+                            (per_leg_eur, cid),
+                        )
+                    continue
+                if per_leg_eur is not None:
                     conn.execute(
                         """UPDATE checklist
                            SET status = 'paid', paid_date = ?, amount_eur = ?
                            WHERE id = ?""",
-                        (today_iso, per_leg, cid),
+                        (today_iso, per_leg_eur, cid),
                     )
                 else:
                     conn.execute(
@@ -370,11 +513,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         (today_iso, cid),
                     )
 
-            # Upfront flights are not "gastos del día" — don't touch itinerary.
+            # Gastos del día: solo si el doc NO es un pago anticipado (no matchea
+            # checklist), no es ida y vuelta y no es un duplicado.
             should_touch_itinerary = (
                 not is_roundtrip
+                and not is_duplicate
+                and not data.get("checklist_id")
                 and data.get("day_number")
-                and per_leg is not None
+                and per_leg_eur is not None
             )
             if should_touch_itinerary:
                 row = conn.execute(
@@ -382,7 +528,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     (data["day_number"],),
                 ).fetchone()
                 current = (row["real_expense"] or 0) if row else 0
-                new_value = current + float(per_leg)
+                new_value = current + float(per_leg_eur)
                 conn.execute(
                     """UPDATE itinerary
                        SET real_expense = ?, status = 'completed'
@@ -390,9 +536,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     (new_value, data["day_number"]),
                 )
 
-        await update.message.reply_text(
-            "✅ Guardado. Todo actualizado en la app."
-        )
+        if is_duplicate:
+            await update.message.reply_text(
+                "✅ Guardado como respaldo. No volví a marcar el pago (ya estaba confirmado)."
+            )
+        else:
+            await update.message.reply_text(
+                "✅ Guardado. Todo actualizado en la app."
+            )
         return
 
     if text in {"no", "n", "cancel", "cancelar"}:

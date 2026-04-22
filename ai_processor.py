@@ -24,29 +24,33 @@ reserva o comprobante de pago. Extraé la siguiente información en JSON:
 {
   "tipo": "vuelo"|"hotel"|"transporte"|"museo_entrada"|"comida"|"otro",
   "descripcion": string,
-  "monto_total_eur": number | null,   // total del documento tal cual aparece
-  "monto_eur": number | null,          // monto a aplicar a cada item del checklist que coincide (ver regla de ida y vuelta abajo)
-  "monto_usd": number | null,
+  "moneda": "EUR"|"USD"|"ARS"|"otro",      // moneda que aparece en el documento
+  "monto_total_original": number | null,   // total del documento en su moneda original, tal como aparece
+  "monto_original": number | null,         // monto a aplicar a cada item del checklist, en la moneda original (ver regla de ida y vuelta)
   "fecha": string (YYYY-MM-DD) | null,
   "proveedor": string | null,
   "numero_reserva": string | null,
   "dia_viaje": number | null (del 1 al 22),
-  "es_ida_vuelta": boolean,            // true SOLO si es un ticket de vuelo ida y vuelta (round trip)
-  "coincide_checklist": string | null, // item de ida o item único
+  "es_ida_vuelta": boolean,                // true SOLO si es un ticket de vuelo ida y vuelta (round trip)
+  "coincide_checklist": string | null,     // item de ida o item único
   "coincide_checklist_vuelta": string | null, // SOLO si es_ida_vuelta=true: item del tramo de vuelta
   "confianza": "alta" | "media" | "baja"
 }
 
+MONEDA:
+- Identificá la moneda real del documento: EUR (€), USD (US$/USD), ARS (AR$/$ en Argentina).
+- No conviertas nada: los montos van en su moneda original y el sistema los convierte después.
+
 REGLA CLAVE para vuelos ida y vuelta:
 - Si el documento cubre ida Y vuelta (round trip), poné es_ida_vuelta=true.
-- En monto_total_eur poné el total tal como sale en el ticket.
-- En monto_eur poné el precio por tramo: si el desglose está en el ticket usalo;
+- En monto_total_original poné el total tal como sale en el ticket.
+- En monto_original poné el precio por tramo: si el desglose está en el ticket usalo;
   si solo hay un total, dividilo por 2.
 - En coincide_checklist sugerí el item de ida y en coincide_checklist_vuelta el
   item de vuelta (ej: "Vuelo EZE→BCN ida" y "Vuelo BCN→EZE vuelta").
 
-Para documentos que NO son ida y vuelta: es_ida_vuelta=false, monto_eur =
-monto_total_eur, y coincide_checklist_vuelta = null.
+Para documentos que NO son ida y vuelta: es_ida_vuelta=false, monto_original =
+monto_total_original, y coincide_checklist_vuelta = null.
 
 Respondé SOLO el JSON, sin texto extra."""
 

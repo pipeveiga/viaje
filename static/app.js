@@ -333,6 +333,7 @@ function renderDocuments() {
             ${d.provider ? ` · ${d.provider}` : ""}
             ${d.day_number ? ` · día ${d.day_number}` : ""}
             ${d.amount_eur != null ? ` · ${fmtEur(d.amount_eur)}` : ""}
+            ${d.amount_usd != null ? ` · ${fmtUsd(d.amount_usd)}` : ""}
           </div>
         </div>
         <div class="flex gap-2">
@@ -415,6 +416,7 @@ const modal = document.getElementById("config-modal");
 document.getElementById("btn-config").addEventListener("click", async () => {
   const cfg = await api("/config");
   document.getElementById("config-rate").value = cfg.eur_usd_rate || "1.172";
+  document.getElementById("config-ars").value = cfg.usd_ars_rate || "1450";
   modal.classList.remove("hidden");
 });
 document.getElementById("config-cancel").addEventListener("click", () => {
@@ -422,10 +424,12 @@ document.getElementById("config-cancel").addEventListener("click", () => {
 });
 document.getElementById("config-save").addEventListener("click", async () => {
   const rate = parseFloat(document.getElementById("config-rate").value);
-  if (!rate || rate <= 0) return alert("Tipo de cambio inválido");
+  const ars = parseFloat(document.getElementById("config-ars").value);
+  if (!rate || rate <= 0) return alert("Tipo de cambio EUR/USD inválido");
+  if (!ars || ars <= 0) return alert("Tipo de cambio USD/ARS inválido");
   await api("/config", {
     method: "PUT",
-    body: JSON.stringify({ eur_usd_rate: rate }),
+    body: JSON.stringify({ eur_usd_rate: rate, usd_ars_rate: ars }),
   });
   modal.classList.add("hidden");
   await loadAll();

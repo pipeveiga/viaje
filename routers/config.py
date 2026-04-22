@@ -11,6 +11,7 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 
 class ConfigUpdate(BaseModel):
     eur_usd_rate: float | None = None
+    usd_ars_rate: float | None = None
     trip_name: str | None = None
     traveler: str | None = None
 
