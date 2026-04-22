@@ -939,9 +939,12 @@ def _build_trip_context() -> str:
 
     est = sum((r["estimated_expense"] or 0) for r in itin)
     spent = sum((r["real_expense"] or 0) for r in itin)
-    paid = sum((r["amount_eur"] or 0) for r in ch if r["status"] == "paid")
-    pending = sum((r["amount_eur"] or 0) for r in ch if r["status"] == "pending")
-    total = est + paid + pending
+    paid_items = [r for r in ch if r["status"] == "paid"]
+    pending_items = [r for r in ch if r["status"] != "paid"]
+    paid = sum((r["amount_eur"] or 0) for r in paid_items)
+    pending_known = sum((r["amount_eur"] or 0) for r in pending_items if r["amount_eur"] is not None)
+    pending_unknown_count = sum(1 for r in pending_items if r["amount_eur"] is None)
+    total_known = est + paid + pending_known
 
     def eur(v: float) -> str:
         return f"€{v:,.2f}"
@@ -952,11 +955,14 @@ def _build_trip_context() -> str:
         f"Hoy: {today.isoformat()}",
         f"Tipo de cambio EUR/USD: {rate}",
         "",
-        "Presupuesto:",
-        f"  Total estimado: {eur(total)}",
-        f"  Pagado: {eur(paid)}",
-        f"  Pendiente por pagar: {eur(pending)}",
-        f"  Gastado en viaje: {eur(spent)}",
+        "Presupuesto (usá ESTOS números exactos en las respuestas):",
+        f"  Pagado hasta ahora: {eur(paid)}  (suma de los items del checklist con status=paid)",
+        f"  Pendiente con monto conocido: {eur(pending_known)}",
+        f"  Pendientes SIN monto cargado: {pending_unknown_count} items "
+        f"(faltan comprobantes/precios — NO los cuentes como €0, mencionalos como 'a definir')",
+        f"  Gastado en el viaje (itinerario.real_expense): {eur(spent)}",
+        f"  Estimado del itinerario (base comida + actividades): {eur(est)}",
+        f"  Total estimado del viaje (con lo conocido): {eur(total_known)}",
         "",
         "Itinerario completo:",
     ]
