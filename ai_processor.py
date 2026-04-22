@@ -41,13 +41,22 @@ MONEDA:
 - Identificá la moneda real del documento: EUR (€), USD (US$/USD), ARS (AR$/$ en Argentina).
 - No conviertas nada: los montos van en su moneda original y el sistema los convierte después.
 
-REGLA CLAVE para vuelos ida y vuelta:
+REGLA CLAVE para tickets ida y vuelta (vuelos, buses, trenes, transporte):
 - Si el documento cubre ida Y vuelta (round trip), poné es_ida_vuelta=true.
-- En monto_total_original poné el total tal como sale en el ticket.
-- En monto_original poné el precio por tramo: si el desglose está en el ticket usalo;
-  si solo hay un total, dividilo por 2.
-- En coincide_checklist sugerí el item de ida y en coincide_checklist_vuelta el
-  item de vuelta (ej: "Vuelo EZE→BCN ida" y "Vuelo BCN→EZE vuelta").
+- monto_total_original = total que aparece en el ticket (sin tocar).
+- monto_original = precio por UN SOLO TRAMO. Si el ticket muestra el desglose
+  por tramo, usalo tal cual. Si SOLO muestra un total, dividí ese total por 2.
+- En ida y vuelta, monto_original casi siempre es DISTINTO de
+  monto_total_original. Si vas a poner el mismo número en los dos, parate y
+  dividí monto_original por 2.
+
+Ejemplos:
+- Bus FCO↔Roma Vaticano, ticket andata/ritorno, "13.00 EUR" total →
+  es_ida_vuelta=true, monto_total_original=13, monto_original=6.50.
+- Vuelo EZE↔BCN ida y vuelta, total mostrado €1484, sin desglose →
+  es_ida_vuelta=true, monto_total_original=1484, monto_original=742.
+- Vuelo BCN→FCO solo ida, €120 →
+  es_ida_vuelta=false, monto_total_original=120, monto_original=120.
 
 Para documentos que NO son ida y vuelta: es_ida_vuelta=false, monto_original =
 monto_total_original, y coincide_checklist_vuelta = null.

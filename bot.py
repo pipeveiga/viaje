@@ -369,6 +369,13 @@ async def handle_document_or_photo(
     if not is_roundtrip and total_orig is None:
         total_orig = per_leg_orig
 
+    # Red de seguridad: si la IA detectó ida y vuelta pero devolvió el mismo
+    # número como total y como tramo (típico cuando el ticket no muestra
+    # desglose), dividimos por 2 acá.
+    if is_roundtrip and total_orig is not None:
+        if per_leg_orig is None or abs(float(per_leg_orig) - float(total_orig)) < 0.01:
+            per_leg_orig = round(float(total_orig) / 2, 2)
+
     per_leg_eur, per_leg_usd = _convert_amounts(per_leg_orig, currency)
     total_eur, total_usd = _convert_amounts(total_orig, currency)
 
