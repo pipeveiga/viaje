@@ -351,10 +351,24 @@ _SEARCH_STOPWORDS = {
     "archivo", "foto", "documento", "doc", "pdf",
 }
 
+# Palabras que, si aparecen en el query, acotan los resultados a cierto tipo
+# de documento (match contra doc_type o contra la descripción normalizada).
+_TYPE_KEYWORDS = {
+    "hotel": {"doc_types": {"hotel"}, "desc_terms": {"hotel"}},
+    "vuelo": {"doc_types": {"vuelo"}, "desc_terms": {"vuelo", "flight"}},
+    "avion": {"doc_types": {"vuelo"}, "desc_terms": {"vuelo"}},
+    "tren": {"doc_types": {"transporte"}, "desc_terms": {"tren", "ave", "renfe"}},
+    "bus": {"doc_types": {"transporte"}, "desc_terms": {"bus", "autobus", "colectivo"}},
+    "tour": {"doc_types": {"museo_entrada"}, "desc_terms": {"tour", "bernabeu", "bernabéu"}},
+    "museo": {"doc_types": {"museo_entrada"}, "desc_terms": {"museo", "coliseo"}},
+    "entrada": {"doc_types": {"museo_entrada"}, "desc_terms": {"entrada"}},
+}
+
 
 def _search_documents(query: str, limit: int = 6) -> list[dict]:
     """Busca documentos guardados (confirmed=1) por descripción, proveedor,
     tipo, número de reserva, nombre de archivo y ciudad del día asociado.
+    Si el query menciona un tipo (hotel, tren, vuelo...) filtra a ese tipo.
     Devuelve los matches ordenados por score descendente.
     """
     q_norm = _normalize(query or "")
@@ -365,6 +379,15 @@ def _search_documents(query: str, limit: int = 6) -> list[dict]:
     ]
     if not tokens:
         return []
+
+    # Tipos mencionados en el query → filtro duro.
+    type_hits = [t for t in tokens if t in _TYPE_KEYWORDS]
+    allowed_doc_types: set[str] = set()
+    required_desc_terms: set[str] = set()
+    for t in type_hits:
+        allowed_doc_types.update(_TYPE_KEYWORDS[t]["doc_types"])
+        required_desc_terms.update(_TYPE_KEYWORDS[t]["desc_terms"])
+
     with get_db() as conn:
         rows = conn.execute(
             """SELECT d.*, i.city AS day_city, i.date AS day_date
@@ -373,8 +396,23 @@ def _search_documents(query: str, limit: int = 6) -> list[dict]:
                WHERE d.confirmed = 1
                ORDER BY d.created_at DESC"""
         ).fetchall()
+
     scored = []
     for r in rows:
+        doc_type_n = _normalize(r["doc_type"] or "")
+        description_n = _normalize(r["description"] or "")
+        filename_n = _normalize(r["filename"] or "")
+
+        # Filtro de tipo: si hay keywords de tipo en el query, el doc tiene
+        # que matchear por doc_type O por palabra en descripción/filename.
+        if allowed_doc_types:
+            type_matches = doc_type_n in allowed_doc_types or any(
+                term in description_n or term in filename_n
+                for term in required_desc_terms
+            )
+            if not type_matches:
+                continue
+
         haystack = _normalize(
             " ".join(
                 str(v) if v is not None else ""
@@ -390,6 +428,9 @@ def _search_documents(query: str, limit: int = 6) -> list[dict]:
             )
         )
         score = sum(1 for t in tokens if t in haystack)
+        # Bonus cuando el tipo matchea explícitamente.
+        if allowed_doc_types and doc_type_n in allowed_doc_types:
+            score += 3
         if score > 0:
             scored.append((score, dict(r)))
     scored.sort(key=lambda x: (-x[0], -(x[1]["id"] or 0)))
@@ -1022,16 +1063,26 @@ async def _dispatch_send_document(
     matches = _search_documents(query, limit=6)
 
     if not matches:
-        reply = (
-            intro_reply
-            or f"No encontré ningún comprobante que matchee con \"{query}\"."
-        )
+        reply = f"No encontré ningún comprobante que matchee con \"{query}\"."
         _record_turn(chat_id, "assistant", reply)
         await update.message.reply_text(reply)
         return
 
+    # Si el top tiene claramente más score que el resto, mandamos top 1-2.
+    # Consideramos "claramente mejor" si hay gap ≥ 2 con el siguiente, o
+    # si tiene al menos 3 puntos más que el promedio de los demás.
     if len(matches) > 3:
-        lines = [intro_reply or "Encontré varios, decime cuál:"]
+        # Reconstruimos scores a partir del orden — se perdieron en _search.
+        # Alternativa: hacemos el cut más agresivo si hay type filter.
+        matches_with_score = _search_documents_with_scores(query, limit=6)
+        if matches_with_score:
+            top_score = matches_with_score[0][0]
+            second = matches_with_score[1][0] if len(matches_with_score) > 1 else 0
+            if top_score - second >= 2:
+                matches = [d for _, d in matches_with_score[:2] if _ >= top_score - 1]
+
+    if len(matches) > 3:
+        lines = ["Tengo varios que podrían ser, decime cuál:"]
         for d in matches:
             desc = d.get("description") or d.get("filename") or "doc"
             bits = [desc]
@@ -1095,6 +1146,62 @@ async def _dispatch_send_document(
             "assistant",
             f"[envié: {', '.join(sent_labels)}]",
         )
+
+
+def _search_documents_with_scores(query: str, limit: int = 6) -> list[tuple[int, dict]]:
+    """Igual que _search_documents pero conservando los scores (para decidir
+    si mandar el top directo o listar opciones).
+    """
+    q_norm = _normalize(query or "")
+    tokens = [
+        t for t in q_norm.split()
+        if len(t) > 2 and t not in _SEARCH_STOPWORDS
+    ]
+    if not tokens:
+        return []
+    type_hits = [t for t in tokens if t in _TYPE_KEYWORDS]
+    allowed_doc_types: set[str] = set()
+    required_desc_terms: set[str] = set()
+    for t in type_hits:
+        allowed_doc_types.update(_TYPE_KEYWORDS[t]["doc_types"])
+        required_desc_terms.update(_TYPE_KEYWORDS[t]["desc_terms"])
+
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT d.*, i.city AS day_city, i.date AS day_date
+               FROM documents d
+               LEFT JOIN itinerary i ON d.day_number = i.day_number
+               WHERE d.confirmed = 1
+               ORDER BY d.created_at DESC"""
+        ).fetchall()
+    scored = []
+    for r in rows:
+        doc_type_n = _normalize(r["doc_type"] or "")
+        description_n = _normalize(r["description"] or "")
+        filename_n = _normalize(r["filename"] or "")
+        if allowed_doc_types:
+            if not (
+                doc_type_n in allowed_doc_types
+                or any(term in description_n or term in filename_n for term in required_desc_terms)
+            ):
+                continue
+        haystack = _normalize(
+            " ".join(
+                str(v) if v is not None else ""
+                for v in (
+                    r["description"], r["doc_type"], r["provider"],
+                    r["reservation_number"], r["filename"],
+                    r["day_city"], r["day_date"],
+                )
+            )
+        )
+        score = sum(1 for t in tokens if t in haystack)
+        if allowed_doc_types and doc_type_n in allowed_doc_types:
+            score += 3
+        if score > 0:
+            scored.append((score, dict(r)))
+    scored.sort(key=lambda x: (-x[0], -(x[1]["id"] or 0)))
+    return scored[:limit]
 
 
 def _build_pending_from_action(action: dict) -> tuple[dict | None, str]:
