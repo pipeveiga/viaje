@@ -249,7 +249,7 @@ Formato de salida SIEMPRE es este JSON (sin texto fuera):
                                 // datos si corresponde. 1-6 oraciones o una
                                 // lista breve.
   "action": null | {
-    "type": "add_activity" | "mark_paid" | "update_checklist_amount" | "mark_paid_roundtrip",
+    "type": "add_activity" | "mark_paid" | "update_checklist_amount" | "mark_paid_roundtrip" | "send_document",
 
     // add_activity — Felipe reservó/planea una visita, tour, museo,
     // actividad para un día. Requiere day_number y description.
@@ -270,7 +270,12 @@ Formato de salida SIEMPRE es este JSON (sin texto fuera):
     // mitad del total. Campos extra obligatorios:
     "checklist_concept_ida": string | null,
     "checklist_concept_vuelta": string | null,
-    "total_eur": number | null
+    "total_eur": number | null,
+
+    // send_document — Felipe te pide que le mandes un comprobante que ya
+    // subió al bot (ticket, factura, reserva, foto). Devolvé el query más
+    // útil para buscarlo: palabras claves + día/ciudad si aplica.
+    "query": string | null
   }
 }
 
@@ -299,6 +304,14 @@ Ejemplos de comportamiento:
   reply: "Llevás €X pagados en pagos anticipados y €Y en gastos del viaje.
          Resto pendiente: €Z."
   action: null
+
+• Felipe: "pasame el ticket del hotel de Madrid"
+  reply: "Ahí te lo mando 👇"
+  action: send_document con query="hotel Madrid"
+
+• Felipe: "mandame la reserva del bus a Roma"
+  reply: "Dale, va en un segundo."
+  action: send_document con query="bus Roma Vaticano"
 
 Reglas fuertes:
 - Leé el contexto (itinerario, checklist) y usá datos reales, no inventes.

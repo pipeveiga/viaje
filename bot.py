@@ -344,6 +344,58 @@ def _convert_amounts(
     return round(float(amount), 2), round(float(amount) * eur_usd, 2)
 
 
+_SEARCH_STOPWORDS = {
+    "de", "del", "la", "el", "los", "las", "y", "o", "a", "en", "con",
+    "para", "que", "me", "te", "mandame", "pasame", "enviame", "mostrame",
+    "subi", "subido", "subida", "ticket", "comprobante", "factura", "reserva",
+    "archivo", "foto", "documento", "doc", "pdf",
+}
+
+
+def _search_documents(query: str, limit: int = 6) -> list[dict]:
+    """Busca documentos guardados (confirmed=1) por descripción, proveedor,
+    tipo, número de reserva, nombre de archivo y ciudad del día asociado.
+    Devuelve los matches ordenados por score descendente.
+    """
+    q_norm = _normalize(query or "")
+    tokens = [
+        t
+        for t in q_norm.split()
+        if len(t) > 2 and t not in _SEARCH_STOPWORDS
+    ]
+    if not tokens:
+        return []
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT d.*, i.city AS day_city, i.date AS day_date
+               FROM documents d
+               LEFT JOIN itinerary i ON d.day_number = i.day_number
+               WHERE d.confirmed = 1
+               ORDER BY d.created_at DESC"""
+        ).fetchall()
+    scored = []
+    for r in rows:
+        haystack = _normalize(
+            " ".join(
+                str(v) if v is not None else ""
+                for v in (
+                    r["description"],
+                    r["doc_type"],
+                    r["provider"],
+                    r["reservation_number"],
+                    r["filename"],
+                    r["day_city"],
+                    r["day_date"],
+                )
+            )
+        )
+        score = sum(1 for t in tokens if t in haystack)
+        if score > 0:
+            scored.append((score, dict(r)))
+    scored.sort(key=lambda x: (-x[0], -(x[1]["id"] or 0)))
+    return [d for _, d in scored[:limit]]
+
+
 def _find_duplicate(reservation_number: str | None) -> dict | None:
     """Find a previously confirmed document with the same reservation_number."""
     if not reservation_number:
@@ -937,6 +989,12 @@ async def _answer_free_text(
         await update.message.reply_text(final)
         return
 
+    if action.get("type") == "send_document":
+        await _dispatch_send_document(
+            update, context, action, reply, chat_id
+        )
+        return
+
     pending, confirm_prompt = _build_pending_from_action(action)
     if not pending:
         final = await _reply_or_qa(reply)
@@ -951,6 +1009,92 @@ async def _answer_free_text(
     full = f"{full}\n\n{confirm_prompt}" if full else confirm_prompt
     _record_turn(chat_id, "assistant", full)
     await update.message.reply_text(full, parse_mode="Markdown")
+
+
+async def _dispatch_send_document(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    action: dict,
+    intro_reply: str,
+    chat_id: str,
+) -> None:
+    query = (action.get("query") or update.message.text or "").strip()
+    matches = _search_documents(query, limit=6)
+
+    if not matches:
+        reply = (
+            intro_reply
+            or f"No encontré ningún comprobante que matchee con \"{query}\"."
+        )
+        _record_turn(chat_id, "assistant", reply)
+        await update.message.reply_text(reply)
+        return
+
+    if len(matches) > 3:
+        lines = [intro_reply or "Encontré varios, decime cuál:"]
+        for d in matches:
+            desc = d.get("description") or d.get("filename") or "doc"
+            bits = [desc]
+            if d.get("date"):
+                bits.append(d["date"])
+            if d.get("day_city"):
+                bits.append(d["day_city"])
+            lines.append(f"• {' · '.join(bits)}")
+        text = "\n".join(lines)
+        _record_turn(chat_id, "assistant", text)
+        await update.message.reply_text(text)
+        return
+
+    if intro_reply:
+        await update.message.reply_text(intro_reply)
+    sent_labels: list[str] = []
+    for d in matches:
+        path = Path(d.get("file_path") or "")
+        desc = d.get("description") or d.get("filename") or "doc"
+        caption_bits = [desc]
+        if d.get("date"):
+            caption_bits.append(d["date"])
+        if d.get("amount_eur") is not None:
+            caption_bits.append(f"€{float(d['amount_eur']):.2f}")
+        caption = " · ".join(caption_bits)
+
+        if not path.exists():
+            await update.message.reply_text(
+                f"Tengo el registro de *{desc}* pero no encuentro el archivo en disco."
+                " Quizá se perdió en un redeploy (configurá un Volume en Railway).",
+                parse_mode="Markdown",
+            )
+            continue
+        try:
+            ext = path.suffix.lower()
+            with path.open("rb") as fh:
+                if ext in {".jpg", ".jpeg", ".png", ".webp"}:
+                    await context.bot.send_photo(
+                        chat_id=update.message.chat_id,
+                        photo=fh,
+                        caption=caption,
+                    )
+                else:
+                    await context.bot.send_document(
+                        chat_id=update.message.chat_id,
+                        document=fh,
+                        caption=caption,
+                        filename=d.get("filename") or path.name,
+                    )
+            sent_labels.append(desc)
+        except Exception:  # noqa: BLE001
+            logger.exception("send_document failed for %s", path)
+            await update.message.reply_text(
+                f"No pude mandar *{desc}*, algo falló con el archivo.",
+                parse_mode="Markdown",
+            )
+
+    if sent_labels:
+        _record_turn(
+            chat_id,
+            "assistant",
+            f"[envié: {', '.join(sent_labels)}]",
+        )
 
 
 def _build_pending_from_action(action: dict) -> tuple[dict | None, str]:
