@@ -427,6 +427,36 @@ async def handle_document_or_photo(
         "is_duplicate": is_duplicate,
         "duplicate_of_doc_id": dup["id"] if dup else None,
     }
+
+    # Guardamos el documento en la DB como "no confirmado" apenas llega, así
+    # aunque Felipe después corrija por texto o se olvide de contestar SI/NO,
+    # la foto/PDF queda persistida y visible en el dashboard.
+    doc_eur_pre = total_eur if is_roundtrip else per_leg_eur
+    doc_usd_pre = total_usd if is_roundtrip else per_leg_usd
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO documents
+               (filename, file_path, doc_type, description, amount_eur,
+                amount_usd, date, provider, reservation_number, day_number,
+                checklist_id, confidence, confirmed)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            (
+                filename,
+                str(dest),
+                payload["doc_type"],
+                payload["description"],
+                doc_eur_pre,
+                doc_usd_pre,
+                payload["date"],
+                payload["provider"],
+                payload["reservation_number"],
+                payload["day_number"],
+                payload["checklist_id"],
+                payload["confidence"],
+            ),
+        )
+        payload["document_id"] = cur.lastrowid
+
     _save_pending(str(msg.chat_id), payload)
 
     def _fmt_orig(v: float | None) -> str:
@@ -608,32 +638,59 @@ async def _apply_confirmed_action(data: dict) -> str:
     is_roundtrip = bool(data.get("is_roundtrip"))
     is_duplicate = bool(data.get("is_duplicate"))
     dup_doc_id = data.get("duplicate_of_doc_id")
+    existing_doc_id = data.get("document_id")
 
     doc_eur = total_eur if is_roundtrip else per_leg_eur
     doc_usd = total_usd if is_roundtrip else per_leg_usd
 
     with get_db() as conn:
-        conn.execute(
-            """INSERT INTO documents
-               (filename, file_path, doc_type, description, amount_eur,
-                amount_usd, date, provider, reservation_number, day_number,
-                checklist_id, confidence, confirmed)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
-            (
-                data["filename"],
-                data["file_path"],
-                data["doc_type"],
-                data["description"],
-                doc_eur,
-                doc_usd,
-                data["date"],
-                data["provider"],
-                data["reservation_number"],
-                data["day_number"],
-                data["checklist_id"],
-                data["confidence"],
-            ),
-        )
+        if existing_doc_id:
+            # El doc se insertó no-confirmado cuando llegó la foto/PDF. Sólo
+            # flip a confirmed=1 y refrescamos por si la IA devolvió algo
+            # distinto al momento de confirmar.
+            conn.execute(
+                """UPDATE documents
+                   SET doc_type = ?, description = ?, amount_eur = ?,
+                       amount_usd = ?, date = ?, provider = ?,
+                       reservation_number = ?, day_number = ?, checklist_id = ?,
+                       confidence = ?, confirmed = 1
+                   WHERE id = ?""",
+                (
+                    data["doc_type"],
+                    data["description"],
+                    doc_eur,
+                    doc_usd,
+                    data["date"],
+                    data["provider"],
+                    data["reservation_number"],
+                    data["day_number"],
+                    data["checklist_id"],
+                    data["confidence"],
+                    existing_doc_id,
+                ),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO documents
+                   (filename, file_path, doc_type, description, amount_eur,
+                    amount_usd, date, provider, reservation_number, day_number,
+                    checklist_id, confidence, confirmed)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                (
+                    data["filename"],
+                    data["file_path"],
+                    data["doc_type"],
+                    data["description"],
+                    doc_eur,
+                    doc_usd,
+                    data["date"],
+                    data["provider"],
+                    data["reservation_number"],
+                    data["day_number"],
+                    data["checklist_id"],
+                    data["confidence"],
+                ),
+            )
 
         # Si el doc previo no tenía monto (p.ej. ticket sin precio), lo
         # completamos con el de este (suele ser la factura real).
@@ -725,6 +782,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 Path(consumed["file_path"]).unlink(missing_ok=True)
             except OSError:
                 pass
+            doc_id = consumed.get("document_id")
+            if doc_id:
+                with get_db() as conn:
+                    conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         reply = "Listo, lo descarto. Seguimos."
         _record_turn(chat_id, "assistant", reply)
         await update.message.reply_text(reply)

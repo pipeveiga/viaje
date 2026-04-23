@@ -323,10 +323,15 @@ function renderDocuments() {
   }
   list.innerHTML = state.documents
     .map(
-      (d) => `
-      <div class="card flex flex-col md:flex-row md:items-center gap-3 justify-between">
+      (d) => {
+        const pending = d.confirmed === false;
+        return `
+      <div class="card flex flex-col md:flex-row md:items-center gap-3 justify-between ${pending ? "ring-1 ring-amber-500/40" : ""}">
         <div class="flex-1 min-w-0">
-          <div class="font-semibold">${d.description || d.filename}</div>
+          <div class="font-semibold">
+            ${d.description || d.filename}
+            ${pending ? '<span class="ml-2 text-xs badge badge-pending">Sin confirmar</span>' : ""}
+          </div>
           <div class="text-xs text-slate-400 mt-1">
             ${d.doc_type || "otro"}
             ${d.date ? ` · ${d.date}` : ""}
@@ -340,7 +345,8 @@ function renderDocuments() {
           <a href="/api/documents/${d.id}/file" target="_blank" class="btn-secondary text-sm">Ver</a>
           <button class="btn-secondary text-sm text-red-300" data-del="${d.id}">Eliminar</button>
         </div>
-      </div>`
+      </div>`;
+      }
     )
     .join("");
 
