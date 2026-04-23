@@ -228,6 +228,16 @@ def _recent_turns(chat_id: str, n: int = 8) -> list[dict]:
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
+def _normalize(s: str) -> str:
+    """Lowercase + strip accents + collapse whitespace + drop arrow chars."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower().replace("→", " ").replace("->", " ").replace("/", " ")
+    return " ".join(s.split())
+
+
 def _match_checklist(name_hint: str | None, include_paid: bool = False) -> int | None:
     if not name_hint:
         return None
@@ -238,11 +248,74 @@ def _match_checklist(name_hint: str | None, include_paid: bool = False) -> int |
             rows = conn.execute(
                 "SELECT id, concept, status FROM checklist WHERE status = 'pending'"
             ).fetchall()
-    hint = name_hint.lower()
+
+    hint = _normalize(name_hint)
+    hint_tokens = set(hint.split())
+
+    # 1) Match exacto normalizado o substring
     for r in rows:
-        if r["concept"].lower() in hint or hint in r["concept"].lower():
+        concept_n = _normalize(r["concept"])
+        if concept_n == hint or concept_n in hint or hint in concept_n:
             return r["id"]
-    return None
+
+    # 2) Scoring por tokens en común (ignorando stopwords cortas)
+    stop = {"de", "del", "la", "el", "los", "las", "y", "o", "a", "en"}
+    best, best_score = None, 0
+    for r in rows:
+        concept_n = _normalize(r["concept"])
+        concept_tokens = set(t for t in concept_n.split() if t not in stop and len(t) > 2)
+        hint_significant = set(t for t in hint_tokens if t not in stop and len(t) > 2)
+        score = len(concept_tokens & hint_significant)
+        if score > best_score:
+            best, best_score = r["id"], score
+    return best if best_score >= 2 else None
+
+
+def _match_checklist_by_metadata(
+    doc_type: str | None, day_number: int | None, city: str | None, description: str | None
+) -> int | None:
+    """Fallback cuando la IA no devolvió coincide_checklist: intenta ubicar
+    el item por tipo de documento y día/ciudad del viaje.
+    """
+    if not doc_type:
+        return None
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, concept, detail, status FROM checklist WHERE status = 'pending'"
+        ).fetchall()
+    dt = doc_type.lower()
+    city_n = _normalize(city or "")
+    day = str(day_number) if day_number else None
+
+    candidates = []
+    for r in rows:
+        concept_n = _normalize(r["concept"])
+        detail_n = _normalize(r["detail"] or "")
+        score = 0
+        if dt == "hotel" and "hotel" in concept_n:
+            score += 2
+        if dt in ("vuelo",) and "vuelo" in concept_n:
+            score += 2
+        if dt == "transporte" and any(w in concept_n for w in ("tren", "bus", "t-jove", "metro")):
+            score += 2
+        if dt == "museo_entrada" and any(
+            w in concept_n for w in ("museo", "tour", "coliseo", "bernabeu", "montserrat")
+        ):
+            score += 2
+        if city_n and city_n in concept_n:
+            score += 2
+        if city_n and city_n in detail_n:
+            score += 1
+        if day and day in detail_n:
+            score += 1
+        if score > 0:
+            candidates.append((score, r["id"]))
+
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    # Exigir al menos score 3 para evitar falsos positivos.
+    return candidates[0][1] if candidates[0][0] >= 3 else None
 
 
 def _get_rates() -> tuple[float, float]:
@@ -394,6 +467,22 @@ async def handle_document_or_photo(
         if is_roundtrip
         else None
     )
+
+    # Fallback: si la IA no matcheó pero tenemos tipo + día, inferimos.
+    if not checklist_id and not is_roundtrip:
+        day_num = extracted.get("dia_viaje")
+        day_city = None
+        if day_num:
+            for d in itinerary_days:
+                if d["day_number"] == day_num:
+                    day_city = d["city"]
+                    break
+        checklist_id = _match_checklist_by_metadata(
+            extracted.get("tipo"),
+            day_num,
+            day_city,
+            extracted.get("descripcion"),
+        )
 
     is_duplicate = bool(dup)
     if not is_duplicate and checklist_id:
@@ -825,15 +914,32 @@ async def _answer_free_text(
     reply = (result.get("reply") or "").strip()
     action = result.get("action")
 
+    async def _reply_or_qa(fallback_reply: str) -> str:
+        """Si el modelo contestó algo útil lo devolvemos; si no, hacemos un
+        segundo llamado de Q&A plano para responder con los datos del viaje.
+        """
+        if fallback_reply and fallback_reply.lower() not in {
+            "dale, contame más.",
+            "dale contame más.",
+            "dale, contame más",
+            "perdón, no te entendí bien.",
+        }:
+            return fallback_reply
+        try:
+            return answer_question(update.message.text, _build_trip_context())
+        except Exception:  # noqa: BLE001
+            logger.exception("Q&A fallback inside intent failed")
+            return fallback_reply or "Se me mezcló algo, tirame la pregunta de nuevo."
+
     if not action:
-        final = reply or "Dale, contame más."
+        final = await _reply_or_qa(reply)
         _record_turn(chat_id, "assistant", final)
         await update.message.reply_text(final)
         return
 
     pending, confirm_prompt = _build_pending_from_action(action)
     if not pending:
-        final = reply or "Dale, contame más."
+        final = await _reply_or_qa(reply)
         _record_turn(chat_id, "assistant", final)
         await update.message.reply_text(final)
         return

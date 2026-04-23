@@ -61,6 +61,19 @@ Ejemplos:
 Para documentos que NO son ida y vuelta: es_ida_vuelta=false, monto_original =
 monto_total_original, y coincide_checklist_vuelta = null.
 
+REGLA PARA coincide_checklist (MUY IMPORTANTE):
+- Siempre que el documento represente un pago anticipado del viaje (vuelo,
+  hotel, tren, bus, tour, entrada a museo reservada, etc.), tenés que
+  matchear el item del checklist que te paso en el contexto.
+- coincide_checklist = STRING EXACTO del concept del item (ej:
+  "Hotel Madrid Colectia Stays Atocha", "Vuelo BCN→FCO", "Tour Bernabéu").
+  No inventes nombres, copialos literal del contexto.
+- Si es un hotel con día 3-6 ago en Madrid, es "Hotel Madrid Colectia
+  Stays Atocha". Si es hotel 29-31 jul en Roma, es "Hotel Roma Grand Hotel
+  Olympic". Usá el doc_type + fechas + ciudad para elegir.
+- Sólo devolvé null si realmente no hay ningún item del checklist que
+  corresponda (ej: cena en restaurante, souvenirs, snacks).
+
 Respondé SOLO el JSON, sin texto extra."""
 
 
