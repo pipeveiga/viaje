@@ -1060,7 +1060,11 @@ async def _dispatch_send_document(
     chat_id: str,
 ) -> None:
     query = (action.get("query") or update.message.text or "").strip()
-    matches = _search_documents(query, limit=6)
+    wants_many = any(
+        w in _normalize(update.message.text or "")
+        for w in ("todos", "todas", "ambos", "los dos", "cada uno")
+    )
+    matches = _dedupe_documents(_search_documents(query, limit=10))
 
     if not matches:
         reply = f"No encontré ningún comprobante que matchee con \"{query}\"."
@@ -1068,33 +1072,35 @@ async def _dispatch_send_document(
         await update.message.reply_text(reply)
         return
 
-    # Si el top tiene claramente más score que el resto, mandamos top 1-2.
-    # Consideramos "claramente mejor" si hay gap ≥ 2 con el siguiente, o
-    # si tiene al menos 3 puntos más que el promedio de los demás.
-    if len(matches) > 3:
-        # Reconstruimos scores a partir del orden — se perdieron en _search.
-        # Alternativa: hacemos el cut más agresivo si hay type filter.
-        matches_with_score = _search_documents_with_scores(query, limit=6)
-        if matches_with_score:
-            top_score = matches_with_score[0][0]
-            second = matches_with_score[1][0] if len(matches_with_score) > 1 else 0
+    # Por defecto mandamos el top 1. Si Felipe pidió "todos/ambos/los dos",
+    # mandamos hasta 3. Si hay varios con score parecido y no pidió todos,
+    # listamos opciones en vez de spamear.
+    if not wants_many:
+        scored = _search_documents_with_scores(query, limit=10)
+        scored = _dedupe_scored(scored)
+        if len(scored) >= 2:
+            top_score, second = scored[0][0], scored[1][0]
             if top_score - second >= 2:
-                matches = [d for _, d in matches_with_score[:2] if _ >= top_score - 1]
-
-    if len(matches) > 3:
-        lines = ["Tengo varios que podrían ser, decime cuál:"]
-        for d in matches:
-            desc = d.get("description") or d.get("filename") or "doc"
-            bits = [desc]
-            if d.get("date"):
-                bits.append(d["date"])
-            if d.get("day_city"):
-                bits.append(d["day_city"])
-            lines.append(f"• {' · '.join(bits)}")
-        text = "\n".join(lines)
-        _record_turn(chat_id, "assistant", text)
-        await update.message.reply_text(text)
-        return
+                matches = [scored[0][1]]
+            else:
+                # Varios con score parecido → listamos opciones.
+                lines = ["Tengo varios que podrían ser, decime cuál:"]
+                for _, d in scored[:6]:
+                    desc = d.get("description") or d.get("filename") or "doc"
+                    bits = [desc]
+                    if d.get("date"):
+                        bits.append(d["date"])
+                    if d.get("day_city"):
+                        bits.append(d["day_city"])
+                    lines.append(f"• {' · '.join(bits)}")
+                text = "\n".join(lines)
+                _record_turn(chat_id, "assistant", text)
+                await update.message.reply_text(text)
+                return
+        else:
+            matches = matches[:1]
+    else:
+        matches = matches[:3]
 
     if intro_reply:
         await update.message.reply_text(intro_reply)
@@ -1146,6 +1152,44 @@ async def _dispatch_send_document(
             "assistant",
             f"[envié: {', '.join(sent_labels)}]",
         )
+
+
+def _doc_fingerprint(d: dict) -> tuple:
+    """Llave para detectar que dos filas de documents representan el mismo
+    comprobante (subido más de una vez). Si hay reservation_number lo usamos;
+    si no, caemos a descripción + fecha + monto."""
+    if d.get("reservation_number"):
+        return ("res", str(d["reservation_number"]).strip().lower())
+    return (
+        "desc",
+        _normalize(d.get("description") or d.get("filename") or ""),
+        str(d.get("date") or ""),
+        round(float(d["amount_eur"]), 2) if d.get("amount_eur") is not None else None,
+    )
+
+
+def _dedupe_documents(docs: list[dict]) -> list[dict]:
+    seen: set[tuple] = set()
+    result: list[dict] = []
+    for d in docs:
+        fp = _doc_fingerprint(d)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        result.append(d)
+    return result
+
+
+def _dedupe_scored(scored: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
+    seen: set[tuple] = set()
+    result: list[tuple[int, dict]] = []
+    for score, d in scored:
+        fp = _doc_fingerprint(d)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        result.append((score, d))
+    return result
 
 
 def _search_documents_with_scores(query: str, limit: int = 6) -> list[tuple[int, dict]]:
