@@ -249,7 +249,7 @@ Formato de salida SIEMPRE es este JSON (sin texto fuera):
                                 // datos si corresponde. 1-6 oraciones o una
                                 // lista breve.
   "action": null | {
-    "type": "add_activity" | "mark_paid" | "update_checklist_amount" | "mark_paid_roundtrip" | "send_document",
+    "type": "add_activity" | "mark_paid" | "update_checklist_amount" | "mark_paid_roundtrip" | "send_document" | "delete_documents",
 
     // add_activity — Felipe reservó/planea una visita, tour, museo,
     // actividad para un día. Requiere day_number y description.
@@ -276,6 +276,12 @@ Formato de salida SIEMPRE es este JSON (sin texto fuera):
     // subió al bot (ticket, factura, reserva, foto). Devolvé el query más
     // útil para buscarlo: palabras claves + día/ciudad si aplica.
     "query": string | null
+
+    // delete_documents — Felipe te pide que BORRES documentos ya cargados
+    // (típico: "borrá los hoteles", "eliminá los tickets de Madrid",
+    // "olvidá los trenes que te mandé"). Reusa el mismo campo "query" con
+    // palabras clave (tipo + ciudad si aplica). El bot va a contar cuántos
+    // matchean y pedir confirmación antes de borrar.
   }
 }
 
@@ -312,6 +318,14 @@ Ejemplos de comportamiento:
 • Felipe: "mandame la reserva del bus a Roma"
   reply: "Dale, va en un segundo."
   action: send_document con query="bus Roma Vaticano"
+
+• Felipe: "borrá los hoteles que te mandé"
+  reply: "Ok, los busco."
+  action: delete_documents con query="hotel"
+
+• Felipe: "eliminá los tickets de Madrid"
+  reply: "Listo, los busco."
+  action: delete_documents con query="tickets Madrid"
 
 Reglas fuertes:
 - Leé el contexto (itinerario, checklist) y usá datos reales, no inventes.

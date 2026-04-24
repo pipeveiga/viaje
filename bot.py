@@ -349,7 +349,8 @@ _SEARCH_STOPWORDS = {
     "de", "del", "la", "el", "los", "las", "y", "o", "a", "en", "con",
     "para", "que", "me", "te", "mandame", "pasame", "enviame", "mostrame",
     "subi", "subido", "subida", "ticket", "comprobante", "factura", "reserva",
-    "archivo", "foto", "documento", "doc", "pdf",
+    "archivo", "foto", "documento", "doc", "pdf", "tenes", "tenés", "hay",
+    "habia", "había", "la", "una", "un",
 }
 
 # Palabras que, si aparecen en el query, acotan los resultados a cierto tipo
@@ -365,12 +366,27 @@ _TYPE_KEYWORDS = {
     "entrada": {"doc_types": {"museo_entrada"}, "desc_terms": {"entrada"}},
 }
 
+# Ciudades conocidas del viaje (normalizadas). Si aparecen en el query, los
+# resultados se acotan a docs asociados a esa ciudad (día o descripción).
+_CITY_KEYWORDS = {
+    "madrid": "madrid",
+    "barcelona": "barcelona",
+    "bcn": "barcelona",
+    "roma": "roma",
+    "rome": "roma",
+    "fco": "roma",
+    "nyc": "nyc",
+    "buenos": "buenos aires",
+    "eze": "buenos aires",
+}
+
 
 def _search_documents(query: str, limit: int = 6) -> list[dict]:
     """Busca documentos guardados (confirmed=1) por descripción, proveedor,
     tipo, número de reserva, nombre de archivo y ciudad del día asociado.
     Si el query menciona un tipo (hotel, tren, vuelo...) filtra a ese tipo.
-    Devuelve los matches ordenados por score descendente.
+    Si menciona una ciudad del viaje (Madrid, Barcelona, Roma) filtra a
+    docs de esa ciudad. Devuelve los matches ordenados por score descendente.
     """
     q_norm = _normalize(query or "")
     tokens = [
@@ -389,6 +405,9 @@ def _search_documents(query: str, limit: int = 6) -> list[dict]:
         allowed_doc_types.update(_TYPE_KEYWORDS[t]["doc_types"])
         required_desc_terms.update(_TYPE_KEYWORDS[t]["desc_terms"])
 
+    # Ciudades mencionadas → filtro por ciudad del día asociado.
+    city_hits = {_CITY_KEYWORDS[t] for t in tokens if t in _CITY_KEYWORDS}
+
     with get_db() as conn:
         rows = conn.execute(
             """SELECT d.*, i.city AS day_city, i.date AS day_date
@@ -403,15 +422,22 @@ def _search_documents(query: str, limit: int = 6) -> list[dict]:
         doc_type_n = _normalize(r["doc_type"] or "")
         description_n = _normalize(r["description"] or "")
         filename_n = _normalize(r["filename"] or "")
+        day_city_n = _normalize(r["day_city"] or "")
 
-        # Filtro de tipo: si hay keywords de tipo en el query, el doc tiene
-        # que matchear por doc_type O por palabra en descripción/filename.
         if allowed_doc_types:
             type_matches = doc_type_n in allowed_doc_types or any(
                 term in description_n or term in filename_n
                 for term in required_desc_terms
             )
             if not type_matches:
+                continue
+
+        if city_hits:
+            city_matches = any(
+                city in day_city_n or city in description_n or city in filename_n
+                for city in city_hits
+            )
+            if not city_matches:
                 continue
 
         haystack = _normalize(
@@ -429,9 +455,10 @@ def _search_documents(query: str, limit: int = 6) -> list[dict]:
             )
         )
         score = sum(1 for t in tokens if t in haystack)
-        # Bonus cuando el tipo matchea explícitamente.
         if allowed_doc_types and doc_type_n in allowed_doc_types:
             score += 3
+        if city_hits and any(c in day_city_n for c in city_hits):
+            score += 2
         if score > 0:
             scored.append((score, dict(r)))
     scored.sort(key=lambda x: (-x[0], -(x[1]["id"] or 0)))
@@ -739,6 +766,35 @@ async def _apply_confirmed_action(data: dict) -> tuple[str, dict | None]:
     uid_seed} and is used by the caller to send a .ics attachment.
     """
     kind = data.get("kind", "document")
+
+    if kind == "delete_documents":
+        ids = data.get("doc_ids") or []
+        if not ids:
+            return "No había nada para borrar.", None
+        placeholders = ",".join("?" * len(ids))
+        removed_files = 0
+        with get_db() as conn:
+            paths = [
+                row["file_path"]
+                for row in conn.execute(
+                    f"SELECT file_path FROM documents WHERE id IN ({placeholders})",
+                    ids,
+                ).fetchall()
+            ]
+            for p in paths:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                    removed_files += 1
+                except OSError:
+                    pass
+            conn.execute(
+                f"DELETE FROM documents WHERE id IN ({placeholders})", ids
+            )
+        return (
+            f"Borrado: {len(ids)} documento{'s' if len(ids) != 1 else ''} "
+            f"({removed_files} archivo{'s' if removed_files != 1 else ''}). 🗑️",
+            None,
+        )
 
     if kind == "activity":
         day = data.get("day_number")
@@ -1181,6 +1237,12 @@ async def _answer_free_text(
         )
         return
 
+    if action.get("type") == "delete_documents":
+        await _dispatch_delete_documents_confirm(
+            update, action, reply, chat_id
+        )
+        return
+
     pending, confirm_prompt = _build_pending_from_action(action)
     if not pending:
         final = await _reply_or_qa(reply)
@@ -1195,6 +1257,53 @@ async def _answer_free_text(
     full = f"{full}\n\n{confirm_prompt}" if full else confirm_prompt
     _record_turn(chat_id, "assistant", full)
     await update.message.reply_text(full, parse_mode="Markdown")
+
+
+async def _dispatch_delete_documents_confirm(
+    update: Update,
+    action: dict,
+    intro_reply: str,
+    chat_id: str,
+) -> None:
+    query = (action.get("query") or "").strip()
+    if not query:
+        msg = intro_reply or "Decime qué querés borrar (ej: 'los hoteles', 'los tickets de Madrid')."
+        _record_turn(chat_id, "assistant", msg)
+        await update.message.reply_text(msg)
+        return
+    matches = _search_documents(query, limit=50)
+    if not matches:
+        msg = f"No encontré documentos que matcheen con \"{query}\"."
+        _record_turn(chat_id, "assistant", msg)
+        await update.message.reply_text(msg)
+        return
+
+    doc_ids = [d["id"] for d in matches]
+    pending = {
+        "kind": "delete_documents",
+        "doc_ids": doc_ids,
+        "query": query,
+    }
+    _save_pending(chat_id, pending)
+
+    preview = []
+    for d in matches[:5]:
+        label = d.get("description") or d.get("filename") or "doc"
+        bits = [label]
+        if d.get("date"):
+            bits.append(d["date"])
+        if d.get("day_city"):
+            bits.append(d["day_city"])
+        preview.append(f"• {' · '.join(bits)}")
+    extra = "" if len(matches) <= 5 else f"\n…y {len(matches) - 5} más"
+    text = (
+        f"{intro_reply or 'Te busqué eso.'}\n\n"
+        f"Voy a borrar *{len(matches)}* documento{'s' if len(matches) != 1 else ''} "
+        f"y sus archivos:\n" + "\n".join(preview) + extra +
+        "\n\n¿Los borro? *SI* / *NO*"
+    )
+    _record_turn(chat_id, "assistant", text)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def _dispatch_send_document(
@@ -1217,33 +1326,10 @@ async def _dispatch_send_document(
         await update.message.reply_text(reply)
         return
 
-    # Por defecto mandamos el top 1. Si Felipe pidió "todos/ambos/los dos",
-    # mandamos hasta 3. Si hay varios con score parecido y no pidió todos,
-    # listamos opciones en vez de spamear.
+    # Por defecto mandamos SIEMPRE el top 1. Si Felipe pidió "todos/ambos/
+    # los dos", mandamos hasta 3.
     if not wants_many:
-        scored = _search_documents_with_scores(query, limit=10)
-        scored = _dedupe_scored(scored)
-        if len(scored) >= 2:
-            top_score, second = scored[0][0], scored[1][0]
-            if top_score - second >= 2:
-                matches = [scored[0][1]]
-            else:
-                # Varios con score parecido → listamos opciones.
-                lines = ["Tengo varios que podrían ser, decime cuál:"]
-                for _, d in scored[:6]:
-                    desc = d.get("description") or d.get("filename") or "doc"
-                    bits = [desc]
-                    if d.get("date"):
-                        bits.append(d["date"])
-                    if d.get("day_city"):
-                        bits.append(d["day_city"])
-                    lines.append(f"• {' · '.join(bits)}")
-                text = "\n".join(lines)
-                _record_turn(chat_id, "assistant", text)
-                await update.message.reply_text(text)
-                return
-        else:
-            matches = matches[:1]
+        matches = matches[:1]
     else:
         matches = matches[:3]
 
@@ -1301,10 +1387,20 @@ async def _dispatch_send_document(
 
 def _doc_fingerprint(d: dict) -> tuple:
     """Llave para detectar que dos filas de documents representan el mismo
-    comprobante (subido más de una vez). Si hay reservation_number lo usamos;
-    si no, caemos a descripción + fecha + monto."""
+    comprobante (subido más de una vez). Chequeos en orden:
+    1) mismo reservation_number no vacío
+    2) mismo checklist_id + misma fecha + mismo monto
+    3) misma descripción normalizada + fecha + monto (fallback)
+    """
     if d.get("reservation_number"):
         return ("res", str(d["reservation_number"]).strip().lower())
+    if d.get("checklist_id") and d.get("date"):
+        return (
+            "cid-date-amt",
+            d["checklist_id"],
+            str(d["date"]),
+            round(float(d["amount_eur"]), 2) if d.get("amount_eur") is not None else None,
+        )
     return (
         "desc",
         _normalize(d.get("description") or d.get("filename") or ""),
@@ -1355,6 +1451,8 @@ def _search_documents_with_scores(query: str, limit: int = 6) -> list[tuple[int,
         allowed_doc_types.update(_TYPE_KEYWORDS[t]["doc_types"])
         required_desc_terms.update(_TYPE_KEYWORDS[t]["desc_terms"])
 
+    city_hits = {_CITY_KEYWORDS[t] for t in tokens if t in _CITY_KEYWORDS}
+
     with get_db() as conn:
         rows = conn.execute(
             """SELECT d.*, i.city AS day_city, i.date AS day_date
@@ -1368,10 +1466,17 @@ def _search_documents_with_scores(query: str, limit: int = 6) -> list[tuple[int,
         doc_type_n = _normalize(r["doc_type"] or "")
         description_n = _normalize(r["description"] or "")
         filename_n = _normalize(r["filename"] or "")
+        day_city_n = _normalize(r["day_city"] or "")
         if allowed_doc_types:
             if not (
                 doc_type_n in allowed_doc_types
                 or any(term in description_n or term in filename_n for term in required_desc_terms)
+            ):
+                continue
+        if city_hits:
+            if not any(
+                c in day_city_n or c in description_n or c in filename_n
+                for c in city_hits
             ):
                 continue
         haystack = _normalize(
@@ -1387,6 +1492,8 @@ def _search_documents_with_scores(query: str, limit: int = 6) -> list[tuple[int,
         score = sum(1 for t in tokens if t in haystack)
         if allowed_doc_types and doc_type_n in allowed_doc_types:
             score += 3
+        if city_hits and any(c in day_city_n for c in city_hits):
+            score += 2
         if score > 0:
             scored.append((score, dict(r)))
     scored.sort(key=lambda x: (-x[0], -(x[1]["id"] or 0)))
