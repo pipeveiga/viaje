@@ -239,7 +239,15 @@ def _normalize(s: str) -> str:
     return " ".join(s.split())
 
 
-def _match_checklist(name_hint: str | None, include_paid: bool = False) -> int | None:
+def _match_checklist(
+    name_hint: str | None,
+    include_paid: bool = False,
+    doc_type: str | None = None,
+) -> int | None:
+    """Resuelve el item del checklist al que apunta `name_hint`.
+    Si doc_type se pasa, filtramos candidatos cuyo concept sea compatible
+    con ese tipo — un recibo de hotel nunca debería matchear "Bono metro".
+    """
     if not name_hint:
         return None
     with get_db() as conn:
@@ -250,20 +258,36 @@ def _match_checklist(name_hint: str | None, include_paid: bool = False) -> int |
                 "SELECT id, concept, status FROM checklist WHERE status = 'pending'"
             ).fetchall()
 
+    # Filtrado por tipo: si doc_type es conocido, sólo consideramos concepts
+    # que correspondan a ese tipo.
+    def _compatible(concept_n: str) -> bool:
+        if not doc_type:
+            return True
+        dt = doc_type.lower()
+        if dt == "hotel":
+            return "hotel" in concept_n
+        if dt == "vuelo":
+            return "vuelo" in concept_n
+        if dt == "transporte":
+            return any(w in concept_n for w in ("tren", "bus", "t-jove", "metro"))
+        return True
+
     hint = _normalize(name_hint)
     hint_tokens = set(hint.split())
 
+    candidates = [(r, _normalize(r["concept"])) for r in rows]
+    compatible_candidates = [(r, cn) for r, cn in candidates if _compatible(cn)]
+    pool = compatible_candidates if compatible_candidates else candidates
+
     # 1) Match exacto normalizado o substring
-    for r in rows:
-        concept_n = _normalize(r["concept"])
+    for r, concept_n in pool:
         if concept_n == hint or concept_n in hint or hint in concept_n:
             return r["id"]
 
     # 2) Scoring por tokens en común (ignorando stopwords cortas)
     stop = {"de", "del", "la", "el", "los", "las", "y", "o", "a", "en"}
     best, best_score = None, 0
-    for r in rows:
-        concept_n = _normalize(r["concept"])
+    for r, concept_n in pool:
         concept_tokens = set(t for t in concept_n.split() if t not in stop and len(t) > 2)
         hint_significant = set(t for t in hint_tokens if t not in stop and len(t) > 2)
         score = len(concept_tokens & hint_significant)
@@ -292,19 +316,31 @@ def _match_checklist_by_metadata(
     for r in rows:
         concept_n = _normalize(r["concept"])
         detail_n = _normalize(r["detail"] or "")
+
+        # Filtro duro por tipo: un hotel nunca va contra "Bono metro", un
+        # vuelo nunca contra un tren, etc.
+        if dt == "hotel" and "hotel" not in concept_n:
+            continue
+        if dt == "vuelo" and "vuelo" not in concept_n:
+            continue
+        if dt == "transporte" and not any(
+            w in concept_n for w in ("tren", "bus", "t-jove", "metro")
+        ):
+            continue
+
         score = 0
         if dt == "hotel" and "hotel" in concept_n:
-            score += 2
-        if dt in ("vuelo",) and "vuelo" in concept_n:
-            score += 2
+            score += 4
+        if dt == "vuelo" and "vuelo" in concept_n:
+            score += 4
         if dt == "transporte" and any(w in concept_n for w in ("tren", "bus", "t-jove", "metro")):
-            score += 2
+            score += 4
         if dt == "museo_entrada" and any(
             w in concept_n for w in ("museo", "tour", "coliseo", "bernabeu", "montserrat")
         ):
-            score += 2
+            score += 4
         if city_n and city_n in concept_n:
-            score += 2
+            score += 3
         if city_n and city_n in detail_n:
             score += 1
         if day and day in detail_n:
@@ -315,8 +351,7 @@ def _match_checklist_by_metadata(
     if not candidates:
         return None
     candidates.sort(reverse=True)
-    # Exigir al menos score 3 para evitar falsos positivos.
-    return candidates[0][1] if candidates[0][0] >= 3 else None
+    return candidates[0][1] if candidates[0][0] >= 4 else None
 
 
 def _get_rates() -> tuple[float, float]:
@@ -350,7 +385,11 @@ _SEARCH_STOPWORDS = {
     "para", "que", "me", "te", "mandame", "pasame", "enviame", "mostrame",
     "subi", "subido", "subida", "ticket", "comprobante", "factura", "reserva",
     "archivo", "foto", "documento", "doc", "pdf", "tenes", "tenés", "hay",
-    "habia", "había", "la", "una", "un",
+    "habia", "había", "una", "un",
+    "borra", "borrá", "borrar", "borralo", "borralos",
+    "elimina", "eliminá", "eliminar", "elimínalo",
+    "olvida", "olvidá", "olvidar",
+    "saca", "sacá", "sacar", "remueve",
 }
 
 # Palabras que, si aparecen en el query, acotan los resultados a cierto tipo
@@ -578,12 +617,17 @@ async def handle_document_or_photo(
     reservation_number = extracted.get("numero_reserva")
     dup = _find_duplicate(reservation_number)
 
+    doc_type_extracted = extracted.get("tipo")
     checklist_id = _match_checklist(
-        extracted.get("coincide_checklist"), include_paid=bool(dup)
+        extracted.get("coincide_checklist"),
+        include_paid=bool(dup),
+        doc_type=doc_type_extracted,
     )
     checklist_id_vuelta = (
         _match_checklist(
-            extracted.get("coincide_checklist_vuelta"), include_paid=bool(dup)
+            extracted.get("coincide_checklist_vuelta"),
+            include_paid=bool(dup),
+            doc_type=doc_type_extracted,
         )
         if is_roundtrip
         else None
@@ -852,6 +896,29 @@ async def _apply_confirmed_action(data: dict) -> tuple[str, dict | None]:
         reply = f"Dale, marqué *{concept}* como pagado{extra}. ✅"
         event = _calendar_event_for_checklist(row, amount_eur) if row else None
         return reply, event
+
+    if kind == "unmark_checklist":
+        cid = data.get("checklist_id")
+        concept = data.get("concept") or "item"
+        if not cid:
+            return "⚠️ No encontré el item.", None
+        with get_db() as conn:
+            conn.execute(
+                """UPDATE checklist
+                   SET status = 'pending', paid_date = NULL, amount_eur = NULL
+                   WHERE id = ?""",
+                (cid,),
+            )
+            # Si el doc tenía este checklist_id asignado, se lo sacamos para
+            # que no quede huérfano-confirmado asociado a un item pendiente.
+            conn.execute(
+                "UPDATE documents SET checklist_id = NULL WHERE checklist_id = ?",
+                (cid,),
+            )
+        return (
+            f"Listo, *{concept}* volvió a pendiente y limpié el importe. ↩️",
+            None,
+        )
 
     if kind == "update_checklist_amount":
         cid = data.get("checklist_id")
@@ -1554,6 +1621,30 @@ def _build_pending_from_action(action: dict) -> tuple[dict | None, str]:
                 "checklist_id": cid,
                 "concept": concept,
                 "amount_eur": float(amount_eur) if amount_eur else None,
+            },
+            prompt,
+        )
+
+    if kind == "unmark_checklist":
+        concept_hint = (action.get("checklist_concept") or "").strip()
+        cid = _match_checklist(concept_hint, include_paid=True)
+        if not cid:
+            return None, ""
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT concept, status FROM checklist WHERE id = ?", (cid,)
+            ).fetchone()
+        if not row:
+            return None, ""
+        concept = row["concept"]
+        prompt = (
+            f"¿Desmarco *{concept}* y lo vuelvo a pendiente? *SI* / *NO*"
+        )
+        return (
+            {
+                "kind": "unmark_checklist",
+                "checklist_id": cid,
+                "concept": concept,
             },
             prompt,
         )
