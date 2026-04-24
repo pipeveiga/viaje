@@ -380,6 +380,46 @@ def _convert_amounts(
     return round(float(amount), 2), round(float(amount) * eur_usd, 2)
 
 
+_HOTEL_PROVIDER_KEYWORDS = {
+    "booking", "airbnb", "expedia", "hotels.com", "despegar", "agoda",
+    "hostelworld", "trivago", "hoteles", "hospedaje", "alojamiento",
+}
+_HOTEL_CONTENT_KEYWORDS = {
+    "check-in", "check out", "checkout", "habitacion",
+    "room", "nights", "noches", "alojamiento", "stay", "hostel", "motel",
+}
+_VUELO_KEYWORDS = {
+    "boarding", "iberia", "ryanair", "vueling", "latam", "aerolin",
+    "airways", "airline", "easyjet", "wizz",
+}
+_TRANSPORTE_KEYWORDS = {
+    "renfe", "trenitalia", "flixbus", "alsa", "interrail", "eurostar",
+}
+
+
+def _infer_doc_type(
+    tipo: str | None,
+    provider: str | None,
+    description: str | None,
+    filename: str,
+) -> str | None:
+    """If AI returned 'otro', try to infer a more specific type from provider/
+    description keywords so the type-based checklist filter can do its job.
+    """
+    if tipo and tipo not in ("otro", ""):
+        return tipo
+    haystack = _normalize(" ".join(filter(None, [provider or "", description or "", filename])))
+    if any(kw in haystack for kw in _HOTEL_PROVIDER_KEYWORDS):
+        return "hotel"
+    if any(kw in haystack for kw in _HOTEL_CONTENT_KEYWORDS):
+        return "hotel"
+    if any(kw in haystack for kw in _VUELO_KEYWORDS):
+        return "vuelo"
+    if any(kw in haystack for kw in _TRANSPORTE_KEYWORDS):
+        return "transporte"
+    return tipo
+
+
 _SEARCH_STOPWORDS = {
     "de", "del", "la", "el", "los", "las", "y", "o", "a", "en", "con",
     "para", "que", "me", "te", "mandame", "pasame", "enviame", "mostrame",
@@ -617,7 +657,12 @@ async def handle_document_or_photo(
     reservation_number = extracted.get("numero_reserva")
     dup = _find_duplicate(reservation_number)
 
-    doc_type_extracted = extracted.get("tipo")
+    doc_type_extracted = _infer_doc_type(
+        extracted.get("tipo"),
+        extracted.get("proveedor"),
+        extracted.get("descripcion"),
+        filename,
+    )
     checklist_id = _match_checklist(
         extracted.get("coincide_checklist"),
         include_paid=bool(dup),
@@ -661,7 +706,7 @@ async def handle_document_or_photo(
     payload = {
         "filename": filename,
         "file_path": str(dest),
-        "doc_type": extracted.get("tipo"),
+        "doc_type": doc_type_extracted or extracted.get("tipo"),
         "description": extracted.get("descripcion"),
         "currency": currency,
         "amount_original": per_leg_orig,

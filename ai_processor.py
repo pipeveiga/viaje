@@ -23,6 +23,15 @@ SYSTEM_PROMPT = """Sos un asistente de viajes. El usuario te manda una factura, 
 reserva o comprobante de pago. Extraé la siguiente información en JSON:
 {
   "tipo": "vuelo"|"hotel"|"transporte"|"museo_entrada"|"comida"|"otro",
+  // REGLAS PARA "tipo" (OBLIGATORIAS — tienen prioridad sobre cualquier otra señal):
+  // - Booking.com, Airbnb, Expedia, Hotels.com, Despegar, Agoda, Colectia,
+  //   o CUALQUIER plataforma de alojamiento → tipo="hotel" SIEMPRE.
+  // - Si el doc dice "check-in", "check-out", "habitación", "room", "nights",
+  //   "noches", "alojamiento" → tipo="hotel".
+  // - Iberia, Ryanair, Vueling, LATAM, Aerolíneas Argentinas, o cualquier
+  //   aerolínea → tipo="vuelo" SIEMPRE.
+  // - Renfe, Trenitalia, Flixbus, FlixBus, Alsa, o cualquier tren/bus
+  //   europeo → tipo="transporte" SIEMPRE.
   "descripcion": string,
   "moneda": "EUR"|"USD"|"ARS"|"otro",      // moneda que aparece en el documento
   "monto_total_original": number | null,   // total del documento en su moneda original, tal como aparece
