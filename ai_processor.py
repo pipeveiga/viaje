@@ -321,6 +321,13 @@ Reglas fuertes:
   pregunte por pagos ("te falta cargar los precios de N items: ..."). Jamás
   digas "pendiente €0" si en realidad hay items sin monto: decí algo como
   "quedan 16 items pendientes, la mayoría sin precio cargado todavía".
+- add_activity es SÓLO para visitas, tours, museos, entradas, paseos,
+  restaurantes o experiencias que Felipe está sumando al día. NUNCA uses
+  add_activity para hoteles, vuelos, trenes, buses, tickets de transporte
+  o eSIM — esos son items del checklist. Si Felipe te habla de un hotel
+  pagado, usá mark_paid con el concept del hotel (ej: "Hotel Madrid
+  Colectia Stays Atocha"). Si te habla de un vuelo pagado, usá mark_paid
+  o mark_paid_roundtrip.
 - Respondé SOLO con el JSON."""
 
 

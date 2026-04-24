@@ -31,6 +31,24 @@ async function api(path, options = {}) {
   return res.json();
 }
 
+// -- country mapping --------------------------------------------------------
+
+const COUNTRY_BY_CITY = {
+  "Barcelona":   { code: "ES", flag: "🇪🇸", name: "España",    cssVar: "es" },
+  "Madrid":      { code: "ES", flag: "🇪🇸", name: "España",    cssVar: "es" },
+  "Roma":        { code: "IT", flag: "🇮🇹", name: "Italia",    cssVar: "it" },
+  "En vuelo":    { code: "AR", flag: "🇦🇷", name: "En tránsito", cssVar: "ar" },
+  "Escala NYC":  { code: "US", flag: "🇺🇸", name: "Escala NYC", cssVar: "us" },
+};
+
+function countryFor(city) {
+  return (
+    COUNTRY_BY_CITY[city] || {
+      code: "--", flag: "🌍", name: city || "Desconocido", cssVar: "neutral",
+    }
+  );
+}
+
 // -- traffic lights ---------------------------------------------------------
 
 const MONTHS_ES = {
@@ -64,15 +82,15 @@ function checklistLevel(item, tripStart) {
   const today = todayIso();
   if (relatedDate) {
     const delta = daysBetween(today, relatedDate);
-    if (delta < 0) return "red";         // fecha ya pasada y sin pagar
-    if (delta <= 14) return "red";       // queda menos de 2 semanas
+    if (delta < 0) return "red";
+    if (delta <= 14) return "red";
     if (delta <= 45) return "yellow";
   }
   if (tripStart) {
     const delta = daysBetween(today, tripStart);
     if (delta <= 14) return "red";
   }
-  if (item.amount_eur == null) return "yellow";  // falta comprobante
+  if (item.amount_eur == null) return "yellow";
   return "gray";
 }
 
@@ -81,8 +99,8 @@ function itineraryLevel(day) {
   const delta = daysBetween(today, day.date);
   const hasReal = day.real_expense != null && day.real_expense > 0;
   if (hasReal) return "green";
-  if (delta < 0) return "red";       // día pasado sin gasto registrado
-  if (delta === 0) return "red";     // es hoy
+  if (delta < 0) return "red";
+  if (delta === 0) return "red";
   if (delta <= 7) return "yellow";
   return "gray";
 }
@@ -117,18 +135,18 @@ function renderSummary() {
   if (!s) return;
   const b = s.budget;
   const cards = [
-    { label: "Presupuesto total", eur: b.total_eur, usd: b.total_usd, color: "text-blue-400" },
-    { label: "Ya pagado", eur: b.paid_eur, usd: b.paid_usd, color: "text-emerald-400" },
-    { label: "Pendiente", eur: b.pending_eur, usd: b.pending_usd, color: "text-amber-400" },
-    { label: "Gastado en viaje", eur: b.spent_eur, usd: b.spent_usd, color: "text-sky-400" },
+    { label: "Presupuesto total", eur: b.total_eur, usd: b.total_usd, color: "var(--sky)" },
+    { label: "Ya pagado",         eur: b.paid_eur,  usd: b.paid_usd,  color: "var(--emerald)" },
+    { label: "Pendiente",         eur: b.pending_eur, usd: b.pending_usd, color: "var(--amber)" },
+    { label: "Gastado en viaje",  eur: b.spent_eur, usd: b.spent_usd, color: "var(--accent)" },
   ];
   document.getElementById("summary-cards").innerHTML = cards
     .map(
       (c) => `
-      <div class="card">
-        <div class="text-xs uppercase tracking-wider text-slate-400">${c.label}</div>
-        <div class="text-xl md:text-2xl font-bold mt-1 ${c.color}">${fmtEur(c.eur)}</div>
-        <div class="text-xs text-slate-400">${fmtUsd(c.usd)}</div>
+      <div class="summary-card" style="--card-color:${c.color}">
+        <div class="label">${c.label}</div>
+        <div class="primary">${fmtEur(c.eur)}</div>
+        <div class="secondary">${fmtUsd(c.usd)}</div>
       </div>`
     )
     .join("");
@@ -151,10 +169,9 @@ function renderAlerts() {
 
   state.itinerary.forEach((d) => {
     const level = itineraryLevel(d);
-    if (level === "red")
-      urgent.push({ label: `Día ${d.day_number} · ${d.activity}`, kind: "día" });
-    else if (level === "yellow")
-      soon.push({ label: `Día ${d.day_number} · ${d.activity}`, kind: "día" });
+    const label = d.activity ? `Día ${d.day_number} · ${d.city}` : `Día ${d.day_number} · ${d.city}`;
+    if (level === "red") urgent.push({ label, kind: "día" });
+    else if (level === "yellow") soon.push({ label, kind: "día" });
   });
 
   const card = document.getElementById("alerts-card");
@@ -178,7 +195,7 @@ function renderAlerts() {
 
   let headline = "";
   if (urgent.length === 0 && soon.length === 0) {
-    headline = `<div class="flex items-center gap-2 text-emerald-400 font-semibold">${dotHTML("green")} Todo al día · sin alertas</div>`;
+    headline = `<div class="flex items-center gap-2 text-emerald-700 font-semibold">${dotHTML("green")} Todo al día</div>`;
   } else {
     headline = `
       <div class="flex items-center gap-4 flex-wrap">
@@ -195,54 +212,97 @@ function renderAlerts() {
 
   card.innerHTML = `
     <div class="flex items-center justify-between gap-3 flex-wrap">
-      <h3 class="font-semibold text-slate-200">🚦 Alertas</h3>
+      <h3 class="font-serif-display text-base">Alertas</h3>
       ${headline}
     </div>
     ${body}`;
 }
 
+// -- itinerary (grouped by country segment) ---------------------------------
+
+function groupByCountry(itinerary) {
+  const groups = [];
+  let current = null;
+  for (const d of itinerary) {
+    const country = countryFor(d.city);
+    if (!current || current.code !== country.code) {
+      current = { ...country, days: [] };
+      groups.push(current);
+    }
+    current.days.push(d);
+  }
+  return groups;
+}
+
 function renderItinerary() {
-  const current = state.summary?.trip?.current_day;
-  const tbody = document.getElementById("itinerary-body");
-  tbody.innerHTML = state.itinerary
-    .map((d) => {
-      const isCurrent = d.day_number === current;
-      const hasReal = d.real_expense != null && d.real_expense > 0;
-      const status = d.status || (hasReal ? "completed" : "empty");
-      const badge =
-        status === "completed"
-          ? '<span class="badge badge-done">Completado</span>'
-          : status === "in_progress"
-          ? '<span class="badge badge-inprog">En curso</span>'
-          : '<span class="badge badge-empty">—</span>';
-      const level = itineraryLevel(d);
+  const currentDay = state.summary?.trip?.current_day;
+  const container = document.getElementById("itinerary-groups");
+  const groups = groupByCountry(state.itinerary);
+
+  container.innerHTML = groups
+    .map((g) => {
+      const firstDate = g.days[0].date;
+      const lastDate = g.days[g.days.length - 1].date;
+      const dayRange =
+        g.days.length === 1
+          ? `Día ${g.days[0].day_number}`
+          : `Días ${g.days[0].day_number}–${g.days[g.days.length - 1].day_number}`;
+
+      const rows = g.days
+        .map((d) => {
+          const isCurrent = d.day_number === currentDay;
+          const hasReal = d.real_expense != null && d.real_expense > 0;
+          const level = itineraryLevel(d);
+          return `
+            <div class="day-row ${isCurrent ? "is-current" : ""}"
+                 style="--country-color:var(--${g.cssVar})">
+              <div>
+                <div class="day-number">${d.day_number}</div>
+                <div class="day-date">${formatShortDate(d.date)}</div>
+              </div>
+              <div>
+                <div class="day-city">${dotHTML(level)} ${d.city}</div>
+                <div class="day-activity"
+                     contenteditable="true"
+                     data-day="${d.day_number}"
+                     data-original="${escapeAttr(d.activity || "")}">${escapeHtml(d.activity || "")}</div>
+              </div>
+              <div class="day-amount">
+                <span class="lbl">Estimado</span>
+                ${fmtEur(d.estimated_expense)}
+              </div>
+              <div class="day-amount">
+                <span class="lbl">Real</span>
+                <input class="real-input"
+                       type="number" step="0.01" min="0"
+                       data-day="${d.day_number}"
+                       value="${d.real_expense ?? ""}"
+                       placeholder="—" />
+              </div>
+              <div class="day-state">
+                ${
+                  hasReal
+                    ? '<span class="badge badge-done">Ok</span>'
+                    : '<span class="badge badge-empty">—</span>'
+                }
+              </div>
+            </div>`;
+        })
+        .join("");
 
       return `
-        <tr class="${isCurrent ? "current-day" : ""} ${hasReal ? "has-real" : "only-estimated"}">
-          <td class="px-3 py-3 font-semibold">
-            <span class="inline-flex items-center gap-2">${dotHTML(level)}${d.day_number}</span>
-          </td>
-          <td class="px-3 py-3 whitespace-nowrap">${d.date}</td>
-          <td class="px-3 py-3">${d.city}</td>
-          <td class="px-3 py-3"><div class="activity-cell">${d.activity || ""}</div></td>
-          <td class="px-3 py-3 text-right tabular-nums">${fmtEur(d.estimated_expense)}</td>
-          <td class="px-3 py-3 text-right tabular-nums">
-            <input
-              class="real-input"
-              type="number"
-              step="0.01"
-              min="0"
-              data-day="${d.day_number}"
-              value="${d.real_expense ?? ""}"
-              placeholder="—"
-            />
-          </td>
-          <td class="px-3 py-3 text-center">${badge}</td>
-        </tr>`;
+        <div class="country-group">
+          <div class="country-header" style="--country-wash:var(--${g.cssVar}-wash)">
+            <span class="flag">${g.flag}</span>
+            <span class="title">${g.name}</span>
+            <span class="sub">${dayRange} · ${firstDate}${firstDate !== lastDate ? " → " + lastDate : ""}</span>
+          </div>
+          ${rows}
+        </div>`;
     })
     .join("");
 
-  tbody.querySelectorAll("input.real-input").forEach((inp) => {
+  container.querySelectorAll("input.real-input").forEach((inp) => {
     inp.addEventListener("change", async (e) => {
       const day = Number(e.target.dataset.day);
       const value = e.target.value === "" ? null : Number(e.target.value);
@@ -260,6 +320,60 @@ function renderItinerary() {
       }
     });
   });
+
+  container.querySelectorAll(".day-activity").forEach((el) => {
+    el.addEventListener("blur", async () => {
+      const day = Number(el.dataset.day);
+      const newValue = el.innerText.trim();
+      const original = (el.dataset.original || "").trim();
+      if (newValue === original) return;
+      try {
+        await api(`/itinerary/${day}`, {
+          method: "PUT",
+          body: JSON.stringify({ activity: newValue }),
+        });
+        el.dataset.original = newValue;
+      } catch (err) {
+        alert("No pude guardar la actividad: " + err.message);
+        el.innerText = original;
+      }
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        el.blur();
+      }
+    });
+  });
+}
+
+function formatShortDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short" }).replace(".", "");
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+function escapeAttr(s) {
+  return escapeHtml(s).replaceAll('"', "&quot;");
+}
+
+// -- checklist --------------------------------------------------------------
+
+function checklistIcon(concept) {
+  const c = concept.toLowerCase();
+  if (c.includes("hotel")) return { icon: "🏨", cls: "hotel" };
+  if (c.includes("vuelo")) return { icon: "✈︎", cls: "flight" };
+  if (c.includes("tren")) return { icon: "🚆", cls: "train" };
+  if (c.includes("bus")) return { icon: "🚌", cls: "bus" };
+  if (c.includes("t-jove") || c.includes("metro")) return { icon: "🚇", cls: "transit" };
+  if (c.includes("esim") || c.includes("datos")) return { icon: "📶", cls: "data" };
+  return { icon: "📄", cls: "" };
 }
 
 function renderChecklist() {
@@ -273,22 +387,20 @@ function renderChecklist() {
         : '<span class="badge badge-pending">Pendiente</span>';
       const amount = item.amount_eur != null ? fmtEur(item.amount_eur) : "—";
       const code = item.reservation_code
-        ? `<span class="ml-2 text-xs text-slate-500">· ${item.reservation_code}</span>`
+        ? `<span class="ml-2 text-xs text-slate-400">· ${item.reservation_code}</span>`
         : "";
       const level = checklistLevel(item, tripStart);
+      const ico = checklistIcon(item.concept);
       return `
-        <div class="card flex items-center justify-between gap-3" data-id="${item.id}">
-          <div class="flex items-start gap-3 flex-1 min-w-0">
-            <input type="checkbox" ${paid ? "checked" : ""}
-              class="mt-1 w-5 h-5 accent-emerald-500 cursor-pointer"
-              data-id="${item.id}" />
-            <div class="min-w-0 flex-1">
-              <div class="font-semibold truncate flex items-center gap-2">
-                ${dotHTML(level)}<span class="truncate">${item.concept}</span>${code}
-              </div>
-              ${item.detail ? `<div class="text-sm text-slate-400">${item.detail}</div>` : ""}
-              <div class="text-xs text-slate-500 mt-1">${badge} · ${amount}</div>
+        <div class="checklist-card ${paid ? "is-paid" : ""}" data-id="${item.id}">
+          <span class="cat-icon ${ico.cls}">${ico.icon}</span>
+          <input type="checkbox" ${paid ? "checked" : ""} data-id="${item.id}" />
+          <div class="min-w-0 flex-1">
+            <div class="font-semibold truncate flex items-center gap-2">
+              ${dotHTML(level)}<span class="truncate">${item.concept}</span>${code}
             </div>
+            ${item.detail ? `<div class="text-sm text-slate-500 mt-0.5">${item.detail}</div>` : ""}
+            <div class="text-xs text-slate-500 mt-1">${badge} · ${amount}</div>
           </div>
         </div>`;
     })
@@ -298,7 +410,7 @@ function renderChecklist() {
     cb.addEventListener("change", async (e) => {
       const id = Number(e.target.dataset.id);
       const status = e.target.checked ? "paid" : "pending";
-      const card = list.querySelector(`.card[data-id="${id}"]`);
+      const card = list.querySelector(`.checklist-card[data-id="${id}"]`);
       try {
         await api(`/checklist/${id}`, {
           method: "PUT",
@@ -322,32 +434,30 @@ function renderDocuments() {
     return;
   }
   list.innerHTML = state.documents
-    .map(
-      (d) => {
-        const pending = d.confirmed === false;
-        return `
-      <div class="card flex flex-col md:flex-row md:items-center gap-3 justify-between ${pending ? "ring-1 ring-amber-500/40" : ""}">
+    .map((d) => {
+      const pending = d.confirmed === false;
+      return `
+      <div class="doc-card ${pending ? "is-pending" : ""}">
         <div class="flex-1 min-w-0">
-          <div class="font-semibold">
-            ${d.description || d.filename}
-            ${pending ? '<span class="ml-2 text-xs badge badge-pending">Sin confirmar</span>' : ""}
+          <div class="font-semibold flex items-center gap-2 flex-wrap">
+            <span>${d.description || d.filename}</span>
+            ${d.doc_type ? `<span class="doc-chip">${d.doc_type}</span>` : ""}
+            ${pending ? '<span class="badge badge-pending">Sin confirmar</span>' : ""}
           </div>
-          <div class="text-xs text-slate-400 mt-1">
-            ${d.doc_type || "otro"}
-            ${d.date ? ` · ${d.date}` : ""}
+          <div class="text-xs text-slate-500 mt-1">
+            ${d.date ? d.date : ""}
             ${d.provider ? ` · ${d.provider}` : ""}
             ${d.day_number ? ` · día ${d.day_number}` : ""}
             ${d.amount_eur != null ? ` · ${fmtEur(d.amount_eur)}` : ""}
             ${d.amount_usd != null ? ` · ${fmtUsd(d.amount_usd)}` : ""}
           </div>
         </div>
-        <div class="flex gap-2">
+        <div class="flex gap-2 shrink-0">
           <a href="/api/documents/${d.id}/file" target="_blank" class="btn-secondary text-sm">Ver</a>
-          <button class="btn-secondary text-sm text-red-300" data-del="${d.id}">Eliminar</button>
+          <button class="btn-secondary text-sm" style="color:var(--rose)" data-del="${d.id}">Eliminar</button>
         </div>
       </div>`;
-      }
-    )
+    })
     .join("");
 
   list.querySelectorAll("button[data-del]").forEach((btn) => {

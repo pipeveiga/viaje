@@ -212,6 +212,37 @@ def init_db() -> None:
                     (legacy,),
                 )
 
+        # Migración idempotente: limpiar de itinerary.activity las líneas que
+        # son hoteles/vuelos/trenes/buses/eSIM (se colaban ahí cuando fallaba
+        # el match contra el checklist). Esas cosas NO son actividades del
+        # día, van al checklist de pagos anticipados.
+        import re
+
+        bad_patterns = re.compile(
+            r"(?im)^\s*[•\-\*]?\s*("
+            r"reserva.*(noche|habitaci)|"
+            r"hotel\s|"
+            r"vuelo\s|"
+            r"tren\s|"
+            r"bus\s|"
+            r"esim|"
+            r"t-jove|"
+            r"bono\s+metro"
+            r").*$"
+        )
+        rows = conn.execute(
+            "SELECT day_number, activity FROM itinerary WHERE activity IS NOT NULL AND activity != ''"
+        ).fetchall()
+        for r in rows:
+            lines = (r["activity"] or "").splitlines()
+            cleaned = [ln for ln in lines if not bad_patterns.match(ln)]
+            new_activity = "\n".join(cleaned).strip()
+            if new_activity != (r["activity"] or "").strip():
+                conn.execute(
+                    "UPDATE itinerary SET activity = ? WHERE day_number = ?",
+                    (new_activity, r["day_number"]),
+                )
+
         for key, value in CONFIG_SEED:
             conn.execute(
                 "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",

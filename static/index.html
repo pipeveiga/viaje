@@ -5,28 +5,31 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TripDesk · Europa 2026</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css" />
 </head>
-<body class="min-h-screen text-slate-100">
-  <div class="max-w-6xl mx-auto px-4 py-6 md:py-10">
+<body class="min-h-screen text-slate-800">
+  <div class="max-w-6xl mx-auto px-4 py-8 md:py-12">
     <!-- Header -->
-    <header class="mb-8">
-      <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+    <header class="mb-10">
+      <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-5">
         <div>
-          <p class="text-xs uppercase tracking-widest text-blue-400" id="traveler">Felipe Veiga</p>
-          <h1 class="text-3xl md:text-4xl font-bold" id="trip-name">Europa 2026</h1>
-          <p class="text-slate-400 mt-1" id="trip-meta">Cargando…</p>
+          <p class="text-xs uppercase tracking-[0.22em] text-[color:var(--accent)] font-medium" id="traveler">Felipe Veiga</p>
+          <h1 class="trip-title" id="trip-name">Europa 2026</h1>
+          <p class="text-slate-500 mt-1" id="trip-meta">Cargando…</p>
         </div>
         <div class="flex items-center gap-3">
-          <div class="bg-slate-800/60 border border-slate-700 rounded-xl px-4 py-3 text-center">
-            <div class="text-xs uppercase tracking-wider text-slate-400">Estado</div>
-            <div class="text-lg font-semibold" id="countdown">—</div>
+          <div class="countdown-card">
+            <div class="text-[11px] uppercase tracking-widest text-slate-500">Estado</div>
+            <div class="text-base md:text-lg font-semibold mt-1" id="countdown">—</div>
           </div>
           <button
             id="btn-config"
-            class="bg-slate-800/60 border border-slate-700 rounded-xl px-3 py-3 hover:border-blue-500"
-            title="Configurar tipo de cambio"
-          >⚙️</button>
+            class="icon-btn"
+            title="Configurar"
+          >⚙︎</button>
         </div>
       </div>
     </header>
@@ -37,12 +40,12 @@
     </section>
 
     <!-- Alerts / traffic lights -->
-    <section id="alerts-card" class="alert-card mb-8">
+    <section id="alerts-card" class="alert-card mb-10">
       <!-- filled by JS -->
     </section>
 
     <!-- Tabs -->
-    <nav class="flex gap-2 mb-4 border-b border-slate-800 overflow-x-auto">
+    <nav class="flex gap-1 mb-5 border-b border-slate-200 overflow-x-auto">
       <button class="tab-btn active" data-tab="itinerary">Itinerario</button>
       <button class="tab-btn" data-tab="checklist">Pagos anticipados</button>
       <button class="tab-btn" data-tab="documents">Documentos</button>
@@ -50,24 +53,7 @@
 
     <!-- Itinerary -->
     <section id="tab-itinerary" class="tab-content">
-      <div class="bg-slate-800/40 border border-slate-700 rounded-xl overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead class="bg-slate-800/80 text-slate-300 uppercase text-xs">
-              <tr>
-                <th class="px-3 py-3 text-left">Día</th>
-                <th class="px-3 py-3 text-left">Fecha</th>
-                <th class="px-3 py-3 text-left">Ciudad</th>
-                <th class="px-3 py-3 text-left">Actividad</th>
-                <th class="px-3 py-3 text-right">Est. (€)</th>
-                <th class="px-3 py-3 text-right">Real (€)</th>
-                <th class="px-3 py-3 text-center">Estado</th>
-              </tr>
-            </thead>
-            <tbody id="itinerary-body"></tbody>
-          </table>
-        </div>
-      </div>
+      <div id="itinerary-groups" class="grid gap-6"></div>
     </section>
 
     <!-- Checklist -->
@@ -77,8 +63,8 @@
 
     <!-- Documents -->
     <section id="tab-documents" class="tab-content hidden">
-      <div class="bg-slate-800/40 border border-slate-700 rounded-xl p-4 mb-4">
-        <h3 class="font-semibold mb-3">Subir documento</h3>
+      <div class="card-soft p-5 mb-5">
+        <h3 class="font-semibold text-base mb-3">Subir documento</h3>
         <form id="upload-form" class="grid md:grid-cols-2 gap-3">
           <input type="file" name="file" required class="input" accept="image/*,.pdf" />
           <select name="doc_type" class="input">
@@ -98,27 +84,31 @@
       </div>
       <div class="grid gap-3" id="documents-list"></div>
     </section>
+
+    <footer class="mt-14 text-center text-xs text-slate-400">
+      TripDesk · hecho con cariño para Felipe ✈
+    </footer>
   </div>
 
   <!-- Config modal -->
-  <div id="config-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-    <div class="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-md w-full">
-      <h2 class="text-xl font-semibold mb-4">Configuración</h2>
-      <label class="block text-sm text-slate-300 mb-1">Tipo de cambio EUR/USD</label>
+  <div id="config-modal" class="hidden fixed inset-0 bg-slate-900/40 backdrop-blur z-50 flex items-center justify-center p-4">
+    <div class="bg-white border border-slate-200 shadow-xl rounded-2xl p-6 max-w-md w-full">
+      <h2 class="text-xl font-semibold mb-4 font-serif-display">Configuración</h2>
+      <label class="block text-sm text-slate-600 mb-1">Tipo de cambio EUR/USD</label>
       <input id="config-rate" type="number" step="0.001" class="input w-full mb-4" />
-      <label class="block text-sm text-slate-300 mb-1">Tipo de cambio USD/ARS (1 USD = X pesos)</label>
+      <label class="block text-sm text-slate-600 mb-1">Tipo de cambio USD/ARS (1 USD = X pesos)</label>
       <input id="config-ars" type="number" step="1" class="input w-full mb-4" />
       <div class="flex justify-end gap-2">
         <button id="config-cancel" class="btn-secondary">Cancelar</button>
         <button id="config-save" class="btn-primary">Guardar</button>
       </div>
-      <div class="mt-6 pt-4 border-t border-slate-800">
-        <p class="text-xs uppercase tracking-wider text-red-400 mb-2">Zona peligrosa</p>
-        <p class="text-sm text-slate-400 mb-3">
+      <div class="mt-6 pt-4 border-t border-slate-200">
+        <p class="text-xs uppercase tracking-wider text-rose-500 mb-2 font-medium">Zona peligrosa</p>
+        <p class="text-sm text-slate-600 mb-3">
           Vacía documentos, montos del checklist y actividades del itinerario.
           Se mantienen los días, ciudades y la lista de pagos anticipados.
         </p>
-        <button id="config-reset" class="w-full px-3 py-2 rounded-lg border border-red-500/40 text-red-300 hover:bg-red-500/10 text-sm">
+        <button id="config-reset" class="w-full px-3 py-2 rounded-lg border border-rose-300 text-rose-600 hover:bg-rose-50 text-sm font-medium">
           🗑️ Empezar de cero
         </button>
       </div>
