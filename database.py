@@ -131,8 +131,10 @@ ITINERARY_SEED = [
 
 
 # (concept, detail, amount_eur, status, reservation_code)
-# Todos los items arrancan como "pending" y sin monto cargado: el usuario
-# manda los comprobantes al bot y la IA completa los precios reales.
+# Sólo pagos anticipados obligatorios del viaje (vuelos, hoteles, trenes,
+# buses, transporte local prepagado, datos). Los museos/actividades NO
+# entran acá: Felipe decide on-the-fly si va y, si va, los carga como
+# actividad del día desde el bot.
 CHECKLIST_SEED = [
     ("Vuelo EZE→BCN ida", "Vuelo internacional Buenos Aires → Barcelona", None, "pending", None),
     ("Vuelo BCN→FCO", "Wizz Air W4 6020, 28-jul 21:45", None, "pending", None),
@@ -144,14 +146,21 @@ CHECKLIST_SEED = [
     ("Bus Roma Vaticano→FCO", "31-jul 15:00", None, "pending", None),
     ("Hotel Roma Grand Hotel Olympic", "29-31 jul", None, "pending", None),
     ("Hotel Madrid Colectia Stays Atocha", "3-6 ago", None, "pending", None),
-    ("Audiencia Papal Vaticano", "29-jul · GRATIS · pendiente reserva", None, "pending", None),
-    ("Coliseo + Foro Romano", "30-jul", None, "pending", None),
-    ("Tour Bernabéu", "4-ago", None, "pending", None),
-    ("Museo Legends Madrid", "4-ago", None, "pending", None),
-    ("Montserrat FGC + cremallera", "9-ago", None, "pending", None),
     ("T-Jove Barcelona", "Transporte en Barcelona", None, "pending", None),
     ("Bono metro Madrid", "Transporte en Madrid", None, "pending", None),
     ("eSIM Europa", "Datos móviles", None, "pending", None),
+]
+
+
+# Items que antes estaban en el checklist y ahora no queremos más (los va
+# cargando Felipe como actividades del día si decide ir). Se borran en cada
+# init_db para limpiar DBs existentes.
+CHECKLIST_LEGACY_CONCEPTS_TO_REMOVE = [
+    "Audiencia Papal Vaticano",
+    "Coliseo + Foro Romano",
+    "Tour Bernabéu",
+    "Museo Legends Madrid",
+    "Montserrat FGC + cremallera",
 ]
 
 
@@ -193,6 +202,15 @@ def init_db() -> None:
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
+        else:
+            # Migración idempotente: borrar items que ahora no queremos (los
+            # museos/actividades pasaron a ser cosas que Felipe carga como
+            # actividad del día sólo si decide ir).
+            for legacy in CHECKLIST_LEGACY_CONCEPTS_TO_REMOVE:
+                conn.execute(
+                    "DELETE FROM checklist WHERE concept = ?",
+                    (legacy,),
+                )
 
         for key, value in CONFIG_SEED:
             conn.execute(
