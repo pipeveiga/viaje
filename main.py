@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from database import init_db, reset_all_data, reset_paid_items
-from routers import checklist, config, documents, itinerary, summary
+from routers import calendar, checklist, config, documents, itinerary, summary
 
 logger = logging.getLogger("tripdesk")
 logging.basicConfig(
@@ -98,6 +98,7 @@ app.include_router(checklist.router)
 app.include_router(documents.router)
 app.include_router(config.router)
 app.include_router(summary.router)
+app.include_router(calendar.router)
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 

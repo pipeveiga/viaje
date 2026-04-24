@@ -36,6 +36,7 @@ from telegram.ext import (
 )
 
 from ai_processor import answer_question, classify_intent, process_document
+from calendar_ics import build_single_event_ics
 from database import get_config, get_db, init_db
 
 logging.basicConfig(
@@ -730,13 +731,12 @@ async def handle_document_or_photo(
     await msg.reply_text(summary, parse_mode="Markdown")
 
 
-async def _apply_confirmed_action(data: dict) -> str:
+async def _apply_confirmed_action(data: dict) -> tuple[str, dict | None]:
     """Persist a pending action previously proposed to the user.
 
-    The payload's `kind` drives behavior:
-    - "document": a receipt that the user wants saved.
-    - "activity": add an activity to a day of the itinerary.
-    - "mark_paid": mark a checklist item as paid, optionally with an amount.
+    Returns (reply_text, calendar_event_or_none). The calendar_event dict, if
+    present, has keys {summary, event_date, time_hm, description, location,
+    uid_seed} and is used by the caller to send a .ics attachment.
     """
     kind = data.get("kind", "document")
 
@@ -745,18 +745,34 @@ async def _apply_confirmed_action(data: dict) -> str:
         description = data.get("description") or "actividad"
         amount_eur = data.get("amount_eur")
         if not day:
-            return "⚠️ No pude guardar la actividad: faltó el día."
+            return "⚠️ No pude guardar la actividad: faltó el día.", None
+        day_meta = None
         with get_db() as conn:
             _append_activity(conn, int(day), description, amount_eur)
+            day_meta = conn.execute(
+                "SELECT date, city FROM itinerary WHERE day_number = ?",
+                (int(day),),
+            ).fetchone()
         extra = f" (€{amount_eur:.2f})" if amount_eur else ""
-        return f"Listo, anoté *{description}*{extra} en el día {day}. 📌"
+        reply = f"Listo, anoté *{description}*{extra} en el día {day}. 📌"
+        event = None
+        if day_meta and day_meta["date"]:
+            event = {
+                "summary": description,
+                "event_date": day_meta["date"],
+                "time_hm": None,
+                "description": f"Actividad del día {day}" + (f" · €{amount_eur:.2f}" if amount_eur else ""),
+                "location": day_meta["city"] or None,
+                "uid_seed": f"activity|{day}|{description}",
+            }
+        return reply, event
 
     if kind == "mark_paid":
         cid = data.get("checklist_id")
         concept = data.get("concept") or "item"
         amount_eur = data.get("amount_eur")
         if not cid:
-            return "⚠️ No encontré el item del checklist."
+            return "⚠️ No encontré el item del checklist.", None
         today_iso = datetime.now().date().isoformat()
         with get_db() as conn:
             if amount_eur is not None:
@@ -773,21 +789,29 @@ async def _apply_confirmed_action(data: dict) -> str:
                        WHERE id = ?""",
                     (today_iso, cid),
                 )
+            row = conn.execute(
+                "SELECT concept, detail FROM checklist WHERE id = ?", (cid,)
+            ).fetchone()
         extra = f" con €{amount_eur:.2f}" if amount_eur else ""
-        return f"Dale, marqué *{concept}* como pagado{extra}. ✅"
+        reply = f"Dale, marqué *{concept}* como pagado{extra}. ✅"
+        event = _calendar_event_for_checklist(row, amount_eur) if row else None
+        return reply, event
 
     if kind == "update_checklist_amount":
         cid = data.get("checklist_id")
         concept = data.get("concept") or "item"
         amount_eur = data.get("amount_eur")
         if not cid or amount_eur is None:
-            return "⚠️ Me faltó algún dato para corregir el importe."
+            return "⚠️ Me faltó algún dato para corregir el importe.", None
         with get_db() as conn:
             conn.execute(
                 "UPDATE checklist SET amount_eur = ? WHERE id = ?",
                 (float(amount_eur), cid),
             )
-        return f"Corregido: *{concept}* ahora figura en €{float(amount_eur):.2f}. ✏️"
+        return (
+            f"Corregido: *{concept}* ahora figura en €{float(amount_eur):.2f}. ✏️",
+            None,
+        )
 
     if kind == "mark_paid_roundtrip":
         cid_ida = data.get("checklist_id_ida")
@@ -796,6 +820,7 @@ async def _apply_confirmed_action(data: dict) -> str:
         concept_ida = data.get("concept_ida") or "ida"
         concept_vuelta = data.get("concept_vuelta") or "vuelta"
         today_iso = datetime.now().date().isoformat()
+        rows = []
         with get_db() as conn:
             for cid in (cid_ida, cid_vuelta):
                 if not cid:
@@ -806,10 +831,22 @@ async def _apply_confirmed_action(data: dict) -> str:
                        WHERE id = ?""",
                     (today_iso, per_leg, cid),
                 )
-        return (
+                r = conn.execute(
+                    "SELECT concept, detail FROM checklist WHERE id = ?", (cid,)
+                ).fetchone()
+                if r:
+                    rows.append(r)
+        reply = (
             f"Marqué *{concept_ida}* y *{concept_vuelta}* como pagados a "
             f"€{float(per_leg):.2f} c/u. ✅"
         )
+        # Usamos el primer tramo (ida) para el evento, ya que el round trip
+        # suele cubrir una ventana larga y el de vuelta también queda en el
+        # feed suscribible.
+        event = None
+        if rows:
+            event = _calendar_event_for_checklist(rows[0], per_leg)
+        return reply, event
 
     # -- document ----------------------------------------------------------
     today_iso = datetime.now().date().isoformat()
@@ -930,9 +967,113 @@ async def _apply_confirmed_action(data: dict) -> str:
                 per_leg_eur,
             )
 
+    # Build calendar event for the doc (when it has a date).
+    event = None
+    if data.get("date"):
+        # Prefer the checklist item's detail for time (flights often have
+        # specific hours in detail like "28-jul 21:45").
+        cid_for_event = data.get("checklist_id") or data.get("checklist_id_vuelta")
+        ch_row = None
+        if cid_for_event:
+            with get_db() as conn:
+                ch_row = conn.execute(
+                    "SELECT concept, detail FROM checklist WHERE id = ?",
+                    (cid_for_event,),
+                ).fetchone()
+        summary = (
+            (ch_row["concept"] if ch_row else None)
+            or data.get("description")
+            or data.get("filename")
+            or "Comprobante"
+        )
+        desc_parts = []
+        if data.get("doc_type"):
+            desc_parts.append(data["doc_type"])
+        if data.get("provider"):
+            desc_parts.append(data["provider"])
+        if per_leg_eur is not None:
+            desc_parts.append(f"€{float(per_leg_eur):.2f}")
+        if data.get("reservation_number"):
+            desc_parts.append(f"Cod {data['reservation_number']}")
+        event = {
+            "summary": summary,
+            "event_date": data["date"],
+            "time_hm": _hhmm_from_detail(ch_row["detail"]) if ch_row else None,
+            "description": " · ".join(desc_parts),
+            "location": None,
+            "uid_seed": f"document|{existing_doc_id or data.get('filename')}",
+        }
+
     if is_duplicate:
-        return "Perfecto, lo guardé como respaldo y te completé el importe si faltaba. 🙌"
-    return "Listo, lo guardé y actualicé la app 🙌"
+        return "Perfecto, lo guardé como respaldo y te completé el importe si faltaba. 🙌", event
+    return "Listo, lo guardé y actualicé la app 🙌", event
+
+
+def _hhmm_from_detail(detail: str | None) -> str | None:
+    if not detail:
+        return None
+    import re
+    m = re.search(r"(\d{1,2}):(\d{2})", detail)
+    if not m:
+        return None
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def _calendar_event_for_checklist(row, amount_eur) -> dict | None:
+    if not row:
+        return None
+    from calendar_ics import parse_detail_date
+
+    d, hm = parse_detail_date(row["detail"])
+    if not d:
+        return None
+    desc_parts = [row["detail"] or ""]
+    if amount_eur is not None:
+        desc_parts.append(f"€{float(amount_eur):.2f}")
+    return {
+        "summary": row["concept"],
+        "event_date": d.isoformat(),
+        "time_hm": hm,
+        "description": " · ".join(p for p in desc_parts if p),
+        "location": None,
+        "uid_seed": f"checklist-event|{row['concept']}|{d.isoformat()}",
+    }
+
+
+async def _send_calendar_event(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | str,
+    event: dict,
+) -> None:
+    """Send a single-event .ics attachment to the user so iPhone opens the
+    Agregar al calendario sheet on tap."""
+    from io import BytesIO
+
+    try:
+        ics_text = build_single_event_ics(
+            summary=event["summary"],
+            event_date=event["event_date"],
+            description=event.get("description"),
+            location=event.get("location"),
+            time_hm=event.get("time_hm"),
+            uid_seed=event.get("uid_seed"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("ics build failed for %s", event)
+        return
+
+    buf = BytesIO(ics_text.encode("utf-8"))
+    safe = "".join(c for c in event["summary"] if c.isalnum() or c in " -_")[:40].strip() or "evento"
+    filename = f"{safe}.ics"
+    try:
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=buf,
+            filename=filename,
+            caption="📅 Tocá el archivo para sumarlo al calendario de tu iPhone.",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("sending .ics attachment failed")
 
 
 SI_WORDS = {"si", "sí", "s", "yes", "y", "dale", "ok", "okay", "listo", "hazlo", "hacelo"}
@@ -952,9 +1093,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if has_pending and text in SI_WORDS:
         data = _consume_pending(chat_id)
-        reply = await _apply_confirmed_action(data)
+        reply, event = await _apply_confirmed_action(data)
         _record_turn(chat_id, "assistant", reply)
         await update.message.reply_text(reply, parse_mode="Markdown")
+        if event:
+            await _send_calendar_event(
+                context, update.message.chat_id, event
+            )
         return
 
     if has_pending and text in NO_WORDS:
